@@ -1,0 +1,9 @@
+{
+  "name": "LearnLoot",
+  "short_name": "LearnLoot",
+  "description": "JEE Maths practice with progress tracking, leaderboard rankings, and exam integrity recording.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0f172a",
+  "theme_color": "#4361ee"
+}
