@@ -1,0 +1,155 @@
+.admin-section {
+  display: grid;
+  gap: 1rem;
+  width: 100%;
+}
+
+.admin-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.admin-section-head h2,
+.admin-section-head p {
+  margin: 0;
+}
+
+.admin-table-wrap {
+  width: 100%;
+  overflow-x: auto;
+}
+
+.admin-table {
+  width: 100%;
+  min-width: 840px;
+  border-collapse: collapse;
+}
+
+.admin-table th,
+.admin-table td {
+  padding: 0.75rem;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.24);
+  text-align: left;
+  vertical-align: middle;
+}
+
+.admin-table th {
+  color: #94a3b8;
+  font-size: 0.78rem;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 1.6rem;
+  padding: 0.2rem 0.55rem;
+  border-radius: 0.5rem;
+  background: #334155;
+  color: #f8fafc;
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+
+.status-recording {
+  background: #0f766e;
+}
+
+.status-completed,
+.status-merging {
+  background: #2563eb;
+}
+
+.status-merged {
+  background: #15803d;
+}
+
+.status-failed {
+  background: #b91c1c;
+}
+
+.recording-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 0.75rem;
+}
+
+.recording-detail-grid div {
+  display: grid;
+  gap: 0.25rem;
+  padding: 0.8rem;
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  border-radius: 0.5rem;
+}
+
+.recording-detail-grid strong {
+  color: #94a3b8;
+  font-size: 0.78rem;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.recording-player-block {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.recording-player-block video {
+  width: 100%;
+  max-height: 520px;
+  border-radius: 0.5rem;
+  background: #020617;
+}
+
+.recording-merge-state {
+  display: grid;
+  gap: 0.55rem;
+  padding: 0.8rem;
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  border-radius: 0.5rem;
+}
+
+.recording-merge-state span {
+  color: #94a3b8;
+}
+
+.chunk-list {
+  display: grid;
+  gap: 0.9rem;
+}
+
+.chunk-card {
+  display: grid;
+  gap: 0.65rem;
+  padding: 0.8rem;
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  border-radius: 0.5rem;
+}
+
+.chunk-card div {
+  display: grid;
+  gap: 0.2rem;
+}
+
+.chunk-card span {
+  overflow-wrap: anywhere;
+  color: #94a3b8;
+  font-size: 0.85rem;
+}
+
+.failed-chunk-list {
+  display: grid;
+  gap: 0.4rem;
+  padding: 0.8rem;
+  border: 1px solid rgba(248, 113, 113, 0.4);
+  border-radius: 0.5rem;
+  background: rgba(127, 29, 29, 0.18);
+}
+
+.failed-chunk-list h3,
+.failed-chunk-list p {
+  margin: 0;
+}
