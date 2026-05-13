@@ -1,0 +1,9 @@
+{
+  "name": "learnloot-netlify",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "build:netlify": "node scripts/build-netlify-public.cjs",
+    "build": "npm run build:netlify"
+  }
+}
