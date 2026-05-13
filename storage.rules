@@ -1,0 +1,37 @@
+rules_version = '2';
+
+service firebase.storage {
+  match /b/{bucket}/o {
+    match /quiz-recordings/{studentId}/{quizId}/{attemptId}/chunks/{fileName} {
+      allow write: if isValidChunkUpload(studentId, fileName);
+      allow read: if isRecordingOwner(studentId) || isAdmin();
+    }
+
+    match /quiz-recordings/{studentId}/{quizId}/{attemptId}/final/{fileName} {
+      allow read: if isRecordingOwner(studentId) || isAdmin();
+      allow write: if isAdmin();
+    }
+
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+
+  function isRecordingOwner(studentId) {
+    return request.auth != null && request.auth.uid == studentId;
+  }
+
+  function isAdmin() {
+    return request.auth != null
+      && request.auth.token.email != null
+      && request.auth.token.email == 'sanskarpatil838@gmail.com';
+  }
+
+  function isValidChunkUpload(studentId, fileName) {
+    return isRecordingOwner(studentId)
+      && request.resource != null
+      && fileName.matches('chunk_[0-9]{4}\\.webm')
+      && request.resource.size < 20 * 1024 * 1024
+      && request.resource.contentType.matches('video/webm.*');
+  }
+}
