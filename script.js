@@ -2869,7 +2869,7 @@ function getHomeSidebarSectionHtml(sectionId) {
             <ul class="sidebar-copy-list">
                 <li>Each student must use their own account.</li>
                 <li>Do not share passwords, impersonate another user, or attempt unauthorized access.</li>
-                <li>Email/password accounts may require email verification before quiz access.</li>
+                <li>Email/password accounts are required for synced quiz access.</li>
             </ul>
 
             <h5>Quiz Integrity</h5>
