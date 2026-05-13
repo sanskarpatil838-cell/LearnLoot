@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="description" content="LearnLoot is a JEE Maths practice platform with secure sign-in, timed quizzes, progress tracking, leaderboard rankings, and exam integrity recording.">
+<meta name="theme-color" content="#4361ee">
+<meta name="referrer" content="strict-origin-when-cross-origin">
+<title>🎯 LearnLoot - The EarnLearn Platform</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="preconnect" href="https://cdnjs.cloudflare.com">
+<link rel="preconnect" href="https://cdn.jsdelivr.net">
+<link rel="preconnect" href="https://www.gstatic.com">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+<script defer src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<link rel="stylesheet" href="styles.css"/>
+</head>
+<body class="dark">
+
+<!-- Animated Background Particles -->
+<div class="particles" id="particles"></div>
+
+<!-- ===== LOGIN SCREEN ===== -->
+<div id="login-screen" class="login-overlay">
+  <div class="login-card">
+    <div class="login-logo">
+      <div class="login-icon"><i class="fas fa-calculator"></i></div>
+      <h1>LearnLoot</h1>
+      <p>The EarnLearn Platform</p>
+    </div>
+    <div class="avatar-section">
+      <p class="avatar-label">Choose your avatar</p>
+      <div class="avatar-grid" id="avatar-grid"></div>
+    </div>
+    <div class="login-form">
+      <input type="text" id="username-input" placeholder="Display name (needed for first signup)" maxlength="20" class="name-input"
+        onkeydown="if(event.key==='Enter') createAccount()"/>
+      <input type="email" id="email-input" placeholder="Enter your email..." class="name-input"
+        onkeydown="if(event.key==='Enter') signInWithEmail()"/>
+      <input type="password" id="password-input" placeholder="Enter your password..." class="name-input"
+        onkeydown="if(event.key==='Enter') signInWithEmail()"/>
+      <button class="btn btn-primary btn-lg" onclick="createAccount()">
+        <i class="fas fa-user-plus"></i> Create Account
+      </button>
+      <button class="btn btn-secondary btn-lg" onclick="signInWithEmail()">
+        <i class="fas fa-envelope"></i> Sign In with Email
+      </button>
+      <button class="auth-link-button" onclick="sendPasswordReset()" type="button">
+        Forgot password?
+      </button>
+      
+      <p class="auth-note">Your account, scores, history, and leaderboard will sync across devices.</p>
+      <p class="auth-note">Allowlisted admin accounts will unlock the admin dashboard automatically after sign-in.</p>
+      <p class="auth-status" id="auth-status"></p>
+    </div>
+  </div>
+</div>
+
+
+<!-- ===== HEADER ===== -->
+<div class="header">
+  <div class="header-content">
+    <div class="header-left">
+      <button class="icon-btn sidebar-toggle-btn" id="home-sidebar-btn" onclick="toggleHomeSidebar()" title="Open Menu" style="display:none">
+        <i class="fas fa-bars"></i>
+      </button>
+      <div class="logo">
+        <i class="fas fa-calculator"></i>
+        <span>LearnLoot</span>
+      </div>
+    </div>
+    <div class="header-right">
+      <div class="user-profile-pill" id="user-profile" onclick="showProfileOptions()">
+        <span id="user-avatar-display">🎓</span>
+        <span id="user-name-display">Guest</span>
+      </div>
+      <div class="wallet">
+        <i class="fas fa-coins"></i>
+        <span>💰 Cash Earned: <span id="points">0</span></span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="home-sidebar-backdrop" id="home-sidebar-backdrop" onclick="closeHomeSidebar()" style="display:none"></div>
+<aside class="home-sidebar" id="home-sidebar" aria-hidden="true">
+  <div class="home-sidebar-header">
+    <div class="home-sidebar-user">
+      <div class="home-sidebar-avatar" id="home-sidebar-avatar">ST</div>
+      <div>
+        <h3 id="home-sidebar-name">Student</h3>
+        <p id="home-sidebar-email">Signed in</p>
+      </div>
+    </div>
+    <button class="icon-btn home-sidebar-close" onclick="closeHomeSidebar()" title="Close Menu">
+      <i class="fas fa-xmark"></i>
+    </button>
+  </div>
+
+  <nav class="home-sidebar-nav" aria-label="Account sections">
+    <button class="home-sidebar-link" data-sidebar-section="edit-profile" onclick="openHomeSidebarSection('edit-profile')">
+      <i class="fas fa-user-pen"></i>
+      <span>Edit Profile</span>
+    </button>
+    <button class="home-sidebar-link" data-sidebar-section="settings" onclick="openHomeSidebarSection('settings')">
+      <i class="fas fa-gear"></i>
+      <span>Settings</span>
+    </button>
+    <button class="home-sidebar-link" data-sidebar-section="contact-us" onclick="openHomeSidebarSection('contact-us')">
+      <i class="fas fa-envelope"></i>
+      <span>Contact Us</span>
+    </button>
+    <button class="home-sidebar-link" data-sidebar-section="about-us" onclick="openHomeSidebarSection('about-us')">
+      <i class="fas fa-circle-info"></i>
+      <span>About Us</span>
+    </button>
+    <button class="home-sidebar-link" data-sidebar-section="privacy-policy" onclick="openHomeSidebarSection('privacy-policy')">
+      <i class="fas fa-shield-halved"></i>
+      <span>Privacy Policy</span>
+    </button>
+    <button class="home-sidebar-link" data-sidebar-section="terms-of-use" onclick="openHomeSidebarSection('terms-of-use')">
+      <i class="fas fa-file-contract"></i>
+      <span>Terms of Use</span>
+    </button>
+  </nav>
+</aside>
+
+<div class="home-section-tab-backdrop" id="home-section-tab-backdrop" onclick="closeHomeSectionTab()" style="display:none"></div>
+<section class="home-section-tab" id="home-section-tab" aria-hidden="true" role="dialog" aria-modal="true" aria-labelledby="home-section-tab-title">
+  <div class="home-section-tab-header">
+    <div>
+      <span class="home-section-tab-kicker">Account Tab</span>
+      <h3 id="home-section-tab-title">Edit Profile</h3>
+    </div>
+    <button class="icon-btn home-section-tab-close" onclick="closeHomeSectionTab()" title="Close Tab">
+      <i class="fas fa-xmark"></i>
+    </button>
+  </div>
+  <div class="home-section-tab-body" id="home-section-tab-body" aria-live="polite"></div>
+</section>
+
+<!-- ===== HOME ===== -->
+<div class="container" id="home" style="display:none">
+
+  <!-- Welcome + Stats -->
+  <div class="dashboard">
+    <div class="welcome-row">
+      <div class="welcome-left">
+        <div class="welcome-avatar" id="welcome-avatar">🎓</div>
+        <div>
+          <h2 id="welcome-name">Welcome!</h2>
+          <p id="welcome-sub" style="color:var(--text-secondary)">Ready to master JEE Maths today?</p>
+        </div>
+      </div>
+      <div class="welcome-actions">
+        <button class="btn btn-secondary btn-sm" id="admin-toggle-btn" onclick="toggleAdminPanel()" style="display:none">
+          <i class="fas fa-shield-halved"></i> Admin Dashboard
+        </button>
+      </div>
+    </div>
+    <div class="stats-grid">
+      <div class="stat-card">
+        <div class="stat-number" id="tests-completed-display">0</div>
+        <div>Tests Completed</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-number" id="total-points-display">0</div>
+        <div>💰 Cash Earned</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-number" id="accuracy-display">0%</div>
+        <div>Average Accuracy</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-number" id="time-spent-display">0h 0m</div>
+        <div>Time Spent</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Performance Charts -->
+  <div class="dashboard">
+    <h2>📊 Performance Analytics</h2>
+    <div class="charts-grid">
+      <div class="chart-container">
+        <h4>Accuracy Trend (Last 10 Tests)</h4>
+        <div class="chart-wrap" id="accuracy-chart-wrap"><canvas id="accuracyChart"></canvas></div>
+      </div>
+      <div class="chart-container">
+        <h4>Best Score Per Chapter</h4>
+        <div class="chart-wrap" id="chapter-chart-wrap"><canvas id="chapterChart"></canvas></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Chapters -->
+  <h2 class="text-center mb-3">📚 Select a Chapter to Begin</h2>
+  <div class="chapter-grid" id="chapter-list"></div>
+
+  <!-- Leaderboard -->
+  <div class="dashboard">
+    <h2>🏆 Leaderboard</h2>
+    <div id="leaderboard-list"></div>
+  </div>
+
+  <!-- History -->
+  <div class="dashboard" id="history-section">
+    <h2>📋 Chapter Attempt History</h2>
+    <div id="history-list"></div>
+  </div>
+
+  <div class="dashboard admin-panel" id="admin-panel" style="display:none">
+    <div class="admin-panel-header">
+      <div>
+        <h2><i class="fas fa-shield-halved"></i> Admin Dashboard</h2>
+        <p class="admin-subtitle">Track users, leaderboard standings, and suspicious quiz behavior in one place.</p>
+      </div>
+      <div class="admin-actions">
+        <button class="btn btn-primary btn-sm" onclick="refreshAdminDashboard()">
+          <i class="fas fa-rotate-right"></i> Refresh
+        </button>
+      </div>
+    </div>
+
+    <p class="auth-status" id="admin-status"></p>
+
+    <div class="stats-grid" id="admin-summary-grid"></div>
+
+    <div class="admin-section">
+      <h3>All Users</h3>
+      <div id="admin-users-list"></div>
+    </div>
+
+    <div class="admin-section">
+      <h3>Recorded Videos by User</h3>
+      <div id="admin-recordings-list"></div>
+    </div>
+
+    <div class="admin-section">
+      <h3>Leaderboard Snapshot</h3>
+      <div id="admin-leaderboard-list"></div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ===== QUIZ ===== -->
+<div class="container quiz" id="quiz" style="display:none">
+  <div class="recording-panel" id="recording-panel">
+    <video id="webcam-preview" class="recording-preview" autoplay muted playsinline></video>
+    <div class="recording-copy">
+      <strong>Quiz Recording</strong>
+      <span id="recording-status">Camera not started</span>
+      <span id="upload-progress">Upload pending</span>
+      <span id="camera-warning" class="recording-warning"></span>
+    </div>
+  </div>
+
+  <div class="timer-container">
+    <div class="timer" id="timer">
+      <i class="fas fa-clock"></i>
+      <span>40:00</span>
+    </div>
+    <div style="display:flex;align-items:center;gap:1rem;">
+      <div class="difficulty-badge" id="difficulty-badge">🎯 All</div>
+      <div class="question-counter">
+        <span id="current-question">1</span>/<span id="total-questions">10</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="progress-container">
+    <div class="progress-bar">
+      <div class="progress" id="progress"></div>
+    </div>
+  </div>
+
+  <h3 class="chapter-title text-center mb-3" id="chapter-title"></h3>
+
+  <div class="question-container">
+    <h3 id="qText" class="mb-2"></h3>
+    <div class="option-grid" id="options"></div>
+  </div>
+
+  <div class="quiz-button-panel">
+    <div class="actions">
+      <button class="btn btn-secondary" onclick="markQuestion()" id="mark-btn">
+        <i class="fas fa-bookmark"></i>Mark for Review
+      </button>
+      <button class="btn btn-primary" onclick="prevQ()" id="prev-btn">
+        <i class="fas fa-arrow-left"></i>Previous
+      </button>
+      <button class="btn btn-primary" onclick="nextQ()" id="next-btn">
+        Next <i class="fas fa-arrow-right"></i>
+      </button>
+      <button class="btn btn-danger" onclick="goHomeEarly()" id="pause-test-btn">
+        <i class="fas fa-home"></i>Pause Test
+      </button>
+      <button class="btn btn-success" onclick="submitTest()" id="submit-btn">
+        <i class="fas fa-paper-plane"></i>Submit Test
+      </button>
+    </div>
+
+    <div class="nav-grid" id="nav"></div>
+  </div>
+</div>
+
+<div class="modal-overlay pre-quiz-recording-modal" id="pre-quiz-recording-modal" style="display:none" role="dialog" aria-modal="true" aria-labelledby="pre-quiz-recording-title">
+  <div class="modal-card pre-quiz-recording-card">
+    <div class="pre-quiz-recording-head">
+      <div class="pre-quiz-recording-icon" aria-hidden="true">
+        <i class="fas fa-video"></i>
+      </div>
+      <div>
+        <h2 id="pre-quiz-recording-title">Recording and Exam Integrity</h2>
+        <p class="modal-subtitle">Read these instructions carefully before starting the quiz.</p>
+      </div>
+    </div>
+
+    <div class="pre-quiz-instructions">
+      <p>This quiz is recorded through your camera and microphone to help prevent cheating.</p>
+      <ul>
+        <li>Sit upright in a well-lit place before you begin.</li>
+        <li>Your face, shoulders, upper body, and both hands must remain clearly visible in the camera frame.</li>
+        <li>Keep only your solving paper or notebook and required writing tools with you.</li>
+        <li>Anything in your hand other than solving paper, notebook, or writing tools may be treated as cheating.</li>
+        <li>Books, phones, hidden devices, extra notes, another person, or repeated suspicious movement may also be treated as cheating.</li>
+        <li>If cheating is suspected, the cash earned from this quiz may be marked invalid.</li>
+      </ul>
+      <h3>Question Navigation Rules</h3>
+      <ul>
+        <li>Questions must be solved in order.</li>
+        <li>You may leave a question unanswered and move to the next question.</li>
+        <li>Once you move forward, you cannot return to the previous question or attempt it again.</li>
+        <li>Jumping directly to another question is disabled.</li>
+      </ul>
+      <p class="pre-quiz-agreement">By continuing, you confirm that you understand these recording and sequential quiz rules and agree to follow them for the full quiz.</p>
+    </div>
+
+    <div class="pre-quiz-recording-actions">
+      <button class="btn btn-secondary" onclick="closePreQuizRecordingInstructions(false)">
+        Cancel
+      </button>
+      <button class="btn btn-primary" id="pre-quiz-recording-start-btn" onclick="closePreQuizRecordingInstructions(true)">
+        <i class="fas fa-check"></i> I Understand, Start Quiz
+      </button>
+    </div>
+  </div>
+</div>
+
+<div class="rule-warning-modal" id="rule-warning-modal" style="display:none" role="dialog" aria-modal="true" aria-labelledby="rule-warning-title">
+  <div class="rule-warning-card">
+    <div class="rule-warning-icon" aria-hidden="true">
+      <i class="fas fa-triangle-exclamation"></i>
+    </div>
+    <div>
+      <h3 id="rule-warning-title">Rule Violation</h3>
+      <p id="rule-warning-message"></p>
+      <button class="btn btn-primary btn-sm" onclick="closeRuleWarningModal()">I Understand</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===== RESULT ===== -->
+<div class="container" id="result" style="display:none">
+  <div class="result-container">
+    <div class="result-top-actions">
+      <button class="btn btn-primary" onclick="goHome()">
+        <i class="fas fa-home"></i>Back to Chapters
+      </button>
+    </div>
+    <h2>🎉 Test Results</h2>
+    <div id="score-display"></div>
+
+    <div class="review-section" id="review-section"></div>
+
+    <div class="leaderboard">
+      <h3>📈 Your Progress Summary</h3>
+      <div class="leaderboard-item">
+        <span>💰 Cash Earned:</span>
+        <span id="total-points">0</span>
+      </div>
+      <div class="leaderboard-item">
+        <span>Tests Completed:</span>
+        <span id="tests-completed">0</span>
+      </div>
+      <div class="leaderboard-item">
+        <span>Average Score:</span>
+        <span id="average-score">0%</span>
+      </div>
+    </div>
+  </div>
+</div>
+<script defer src="https://www.gstatic.com/firebasejs/12.12.1/firebase-app-compat.js"></script>
+<script defer src="https://www.gstatic.com/firebasejs/12.12.1/firebase-auth-compat.js"></script>
+<script defer src="https://www.gstatic.com/firebasejs/12.12.1/firebase-firestore-compat.js"></script>
+<script defer src="https://www.gstatic.com/firebasejs/12.12.1/firebase-storage-compat.js"></script>
+<script defer src="https://www.gstatic.com/firebasejs/12.12.1/firebase-functions-compat.js"></script>
+<script defer src="firebase-config.js"></script>
+<script src="script.js" defer></script>
+
+
+</body>
+</html>
