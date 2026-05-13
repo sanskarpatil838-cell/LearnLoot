@@ -1,0 +1,13 @@
+node_modules/
+**/node_modules/
+.npm-cache/
+.netlify/
+.firebase/
+netlify-public/
+netlify-drop/
+learnloot-netlify-drop.zip
+github-upload/
+learnloot-github-upload.zip
+backend/service-account.json
+backend/.env
+*.log
