@@ -11,3 +11,4 @@ learnloot-github-upload.zip
 backend/service-account.json
 backend/.env
 *.log
+*.err
