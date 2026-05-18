@@ -6,7 +6,7 @@
 <meta name="description" content="LearnLoot is a JEE Maths practice platform with secure sign-in, timed quizzes, progress tracking, leaderboard rankings, and exam integrity recording.">
 <meta name="theme-color" content="#4361ee">
 <meta name="referrer" content="strict-origin-when-cross-origin">
-<title>🎯 LearnLoot - The EarnLearn Platform</title>
+<title>LearnLoot - The EarnLearn Platform</title>
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="preconnect" href="https://cdnjs.cloudflare.com">
 <link rel="preconnect" href="https://cdn.jsdelivr.net">
@@ -71,14 +71,78 @@
     </div>
     <div class="header-right">
       <div class="user-profile-pill" id="user-profile" onclick="showProfileOptions()">
-        <span id="user-avatar-display">🎓</span>
+        <span id="user-avatar-display">ST</span>
         <span id="user-name-display">Guest</span>
       </div>
+      <button class="withdraw-btn" id="withdraw-btn" type="button" onclick="openWithdrawModal()">
+        <i class="fas fa-building-columns"></i>
+        <span>Withdraw</span>
+      </button>
       <div class="wallet">
         <i class="fas fa-coins"></i>
-        <span>💰 Cash Earned: <span id="points">0</span></span>
+        <span>Cash Earned: <span id="points">0</span></span>
       </div>
     </div>
+  </div>
+</div>
+
+<div class="withdraw-modal" id="withdraw-modal" style="display:none" role="dialog" aria-modal="true" aria-labelledby="withdraw-title">
+  <div class="withdraw-card">
+    <div class="withdraw-header">
+      <div>
+        <span class="withdraw-kicker">Wallet Request</span>
+        <h3 id="withdraw-title">Withdraw Points</h3>
+      </div>
+      <button class="icon-btn withdraw-close" type="button" onclick="closeWithdrawModal()" title="Close Withdrawal Form">
+        <i class="fas fa-xmark"></i>
+      </button>
+    </div>
+
+    <form class="withdraw-form" id="withdraw-form" onsubmit="submitWithdrawalRequest(event)">
+      <div class="withdraw-grid">
+        <label>
+          <span>User name</span>
+          <input id="withdraw-name" type="text" readonly>
+        </label>
+        <label>
+          <span>Email</span>
+          <input id="withdraw-email" type="email" readonly>
+        </label>
+        <label>
+          <span>Phone number</span>
+          <input id="withdraw-phone" type="tel" inputmode="tel" maxlength="30" placeholder="Enter phone number">
+        </label>
+        <label>
+          <span>UPI ID</span>
+          <input id="withdraw-upi" type="text" maxlength="120" placeholder="name@upi">
+        </label>
+        <label>
+          <span>Current wallet balance</span>
+          <input id="withdraw-wallet" type="text" readonly>
+        </label>
+        <label>
+          <span>Withdrawal points</span>
+          <input id="withdraw-points" type="number" min="10000" step="1" placeholder="10000">
+        </label>
+        <label>
+          <span>Request date/time</span>
+          <input id="withdraw-date" type="text" readonly>
+        </label>
+        <label>
+          <span>Status</span>
+          <input id="withdraw-current-status" type="text" value="Pending" readonly>
+        </label>
+      </div>
+
+      <p class="withdraw-status" id="withdraw-status"></p>
+
+      <div class="withdraw-actions">
+        <button class="btn btn-secondary" type="button" onclick="closeWithdrawModal()">Cancel</button>
+        <button class="btn btn-primary" id="withdraw-submit-btn" type="submit">
+          <i class="fas fa-paper-plane"></i> Submit Request
+        </button>
+      </div>
+    </form>
   </div>
 </div>
 
@@ -146,7 +210,7 @@
   <div class="dashboard">
     <div class="welcome-row">
       <div class="welcome-left">
-        <div class="welcome-avatar" id="welcome-avatar">🎓</div>
+        <div class="welcome-avatar" id="welcome-avatar">ST</div>
         <div>
           <h2 id="welcome-name">Welcome!</h2>
           <p id="welcome-sub" style="color:var(--text-secondary)">Ready to master JEE Maths today?</p>
@@ -165,7 +229,7 @@
       </div>
       <div class="stat-card">
         <div class="stat-number" id="total-points-display">0</div>
-        <div>💰 Cash Earned</div>
+        <div>Cash Earned</div>
       </div>
       <div class="stat-card">
         <div class="stat-number" id="accuracy-display">0%</div>
@@ -180,7 +244,7 @@
 
   <!-- Performance Charts -->
   <div class="dashboard">
-    <h2>📊 Performance Analytics</h2>
+    <h2><i class="fas fa-chart-line"></i> Performance Analytics</h2>
     <div class="charts-grid">
       <div class="chart-container">
         <h4>Accuracy Trend (Last 10 Tests)</h4>
@@ -194,18 +258,18 @@
   </div>
 
   <!-- Chapters -->
-  <h2 class="text-center mb-3">📚 Select a Chapter to Begin</h2>
+  <h2 class="text-center mb-3"><i class="fas fa-book-open"></i> Select a Chapter to Begin</h2>
   <div class="chapter-grid" id="chapter-list"></div>
 
   <!-- Leaderboard -->
   <div class="dashboard">
-    <h2>🏆 Leaderboard</h2>
+    <h2><i class="fas fa-trophy"></i> Leaderboard</h2>
     <div id="leaderboard-list"></div>
   </div>
 
   <!-- History -->
   <div class="dashboard" id="history-section">
-    <h2>📋 Chapter Attempt History</h2>
+    <h2><i class="fas fa-clipboard-list"></i> Chapter Attempt History</h2>
     <div id="history-list"></div>
   </div>
 
@@ -237,6 +301,11 @@
     </div>
 
     <div class="admin-section">
+      <h3>Withdrawal Requests</h3>
+      <div id="admin-withdrawal-requests-list"></div>
+    </div>
+
+    <div class="admin-section">
       <h3>Leaderboard Snapshot</h3>
       <div id="admin-leaderboard-list"></div>
     </div>
@@ -262,7 +331,7 @@
       <span>40:00</span>
     </div>
     <div style="display:flex;align-items:center;gap:1rem;">
-      <div class="difficulty-badge" id="difficulty-badge">🎯 All</div>
+      <div class="difficulty-badge" id="difficulty-badge">All</div>
       <div class="question-counter">
         <span id="current-question">1</span>/<span id="total-questions">10</span>
       </div>
@@ -369,15 +438,15 @@
         <i class="fas fa-home"></i>Back to Chapters
       </button>
     </div>
-    <h2>🎉 Test Results</h2>
+    <h2>Test Results</h2>
     <div id="score-display"></div>
 
     <div class="review-section" id="review-section"></div>
 
     <div class="leaderboard">
-      <h3>📈 Your Progress Summary</h3>
+      <h3><i class="fas fa-chart-line"></i> Your Progress Summary</h3>
       <div class="leaderboard-item">
-        <span>💰 Cash Earned:</span>
+        <span>Cash Earned:</span>
         <span id="total-points">0</span>
       </div>
       <div class="leaderboard-item">
@@ -396,8 +465,61 @@
 <script defer src="https://www.gstatic.com/firebasejs/12.12.1/firebase-firestore-compat.js"></script>
 <script defer src="https://www.gstatic.com/firebasejs/12.12.1/firebase-storage-compat.js"></script>
 <script defer src="https://www.gstatic.com/firebasejs/12.12.1/firebase-functions-compat.js"></script>
+<script defer src="https://www.gstatic.com/firebasejs/12.12.1/firebase-app-check-compat.js"></script>
 <script defer src="firebase-config.js"></script>
-<script src="script.js" defer></script>
+<script src="script.js?v=20260514-cash-feedback" defer></script>
+<script defer>
+  (function hardenBackendCalls() {
+    function getAppCheckConfig() {
+      return window.appCheckConfig || {};
+    }
+
+    async function getAppCheckHeaders() {
+      const config = getAppCheckConfig();
+      if (!config.enabled || !config.siteKey || typeof firebase === 'undefined' || typeof firebase.appCheck !== 'function') {
+        return {};
+      }
+
+      try {
+        const appCheck = firebase.appCheck();
+        if (!window.learnLootAppCheckActivated) {
+          try {
+            appCheck.activate(config.siteKey, true);
+            window.learnLootAppCheckActivated = true;
+          } catch (error) {
+            const message = String(error && error.message || '');
+            if (!message.toLowerCase().includes('already')) {
+              console.warn('Firebase App Check could not be activated:', error);
+              return {};
+            }
+            window.learnLootAppCheckActivated = true;
+          }
+        }
+        const token = await appCheck.getToken(false);
+        return token && token.token ? { 'X-Firebase-AppCheck': token.token } : {};
+      } catch (error) {
+        console.warn('Firebase App Check token could not be read:', error);
+        return {};
+      }
+    }
+
+    window.addEventListener('load', function patchBackendCaller() {
+      if (typeof window.callBackend !== 'function' || window.callBackend.learnLootHardened) return;
+      const originalCallBackend = window.callBackend;
+      window.callBackend = async function callBackendWithAppCheck(path, options) {
+        const appCheckHeaders = await getAppCheckHeaders();
+        return originalCallBackend(path, {
+          ...(options || {}),
+          headers: {
+            ...((options && options.headers) || {}),
+            ...appCheckHeaders
+          }
+        });
+      };
+      window.callBackend.learnLootHardened = true;
+    });
+  })();
+</script>
 
 
 </body>
