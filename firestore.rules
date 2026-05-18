@@ -39,6 +39,11 @@ service cloud.firestore {
       allow read: if isAdmin();
     }
 
+    match /withdrawalRequests/{requestId} {
+      allow read: if isAdmin() || (signedIn() && resource.data.userId == request.auth.uid);
+      allow create, update, delete: if false;
+    }
+
     match /recordings/{attemptId} {
       allow read: if isAdmin() || (signedIn() && resource.data.studentId == request.auth.uid);
 
@@ -77,3 +82,4 @@ service cloud.firestore {
     }
   }
 }
+
