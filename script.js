@@ -1,8 +1,9 @@
 // ============================================================
 // ===== USER PROFILE =====
 // ============================================================
-const AVATARS = ['🎓', '🦁', '🦊', '🐯', '🦅', '🚀', '⚡', '🔥', '💎', '🌟', '🎯', '🏆'];
+const DISPLAY_AVATARS = ['ST', 'LN', 'FX', 'TR', 'EG', 'RK', 'SP', 'FR', 'DM', 'SR', 'TG', 'CP'];
 const firebaseConfig = window.firebaseConfig || null;
+const appCheckConfig = window.appCheckConfig || {};
 const firebaseReady = typeof firebase !== 'undefined'
     && typeof window.isFirebaseConfigured === 'function'
     && window.isFirebaseConfigured(firebaseConfig);
@@ -12,8 +13,23 @@ const firebaseApp = firebaseReady
     : null;
 const auth = firebaseReady ? firebase.auth() : null;
 const db = firebaseReady ? firebase.firestore() : null;
+let appCheck = null;
 if (auth && typeof auth.useDeviceLanguage === 'function') {
     auth.useDeviceLanguage();
+}
+if (
+    firebaseReady
+    && appCheckConfig.enabled
+    && appCheckConfig.siteKey
+    && typeof firebase.appCheck === 'function'
+) {
+    try {
+        appCheck = firebase.appCheck();
+        appCheck.activate(appCheckConfig.siteKey, true);
+    } catch (error) {
+        console.warn('Firebase App Check could not be activated:', error);
+        appCheck = null;
+    }
 }
 const adminConfig = window.adminConfig || {};
 const backendConfig = window.backendConfig || {};
@@ -31,9 +47,11 @@ const MAX_ADMIN_USERS = Number(adminConfig.maxAdminUsers || 200);
 const MAX_ADMIN_ATTEMPTS = Number(adminConfig.maxAdminAttempts || 250);
 const LEADERBOARD_CACHE_MS = 30 * 1000;
 const AUTO_SUBMIT_MESSAGE = 'Test submitted automatically because the same suspicious activity was detected again.';
+const MIN_WITHDRAWAL_POINTS = 10000;
+const WITHDRAWAL_STATUSES = ['Pending', 'Approved', 'Rejected', 'Paid'];
 
 let currentUser = null;
-let selectedAvatar = AVATARS[0];
+let selectedAvatar = DISPLAY_AVATARS[0];
 let pendingProfileSeed = null;
 let authStateLoadPromise = null;
 let isSubmittingTest = false;
@@ -41,8 +59,11 @@ let testStartSnapshot = null;
 let pausedTestState = null;
 let adminUsers = [];
 let adminAttempts = [];
+let adminWithdrawalRequests = [];
 let adminLoadError = '';
 let adminPanelVisible = false;
+let isSubmittingWithdrawal = false;
+const updatingWithdrawalRequestIds = new Set();
 let cheatLog = null;
 let currentQuestionStartedAt = 0;
 let questionResumeCarryMs = 0;
@@ -55,6 +76,7 @@ let leaderboardFetchedAt = 0;
 let quizMediaStream = null;
 let mediaRecorder = null;
 let currentRecordingAttemptId = '';
+let currentQuizAttemptId = '';
 let recordingUploadTask = null;
 let lastRecordingDownloadUrl = '';
 let recordingChunkIndex = 0;
@@ -72,8 +94,16 @@ const adminAutoMergeErrorMessages = new Map();
 let adminRecordingValidationRun = 0;
 let adminRecordingAutoRefreshTimer = null;
 
+function getNumericValue(value, fallback = 0) {
+    const number = Number(value);
+    if (Number.isFinite(number)) return number;
+
+    const fallbackNumber = Number(fallback);
+    return Number.isFinite(fallbackNumber) ? fallbackNumber : 0;
+}
+
 function getCashEarnedDisplayValue(value = totalPoints) {
-    return Number(value || 0);
+    return getNumericValue(value);
 }
 
 function isBackendEnabled() {
@@ -136,12 +166,14 @@ function getChapterPartInfo(chapter, partNumber = 1) {
 }
 
 function cloneQuizQuestion(question = {}) {
-    return {
+    const clonedQuestion = {
         questionId: String(question.questionId || ''),
         questionNumber: Number(question.questionNumber || 0),
         q: String(question.q || ''),
         o: Array.isArray(question.o) ? question.o.map((option) => String(option || '')) : []
     };
+
+    return clonedQuestion;
 }
 
 function getPausedQuestionList(pausedState) {
@@ -175,6 +207,8 @@ async function loadQuizQuestionsFromBackend(chapter, partNumber = 1) {
     const response = await callBackend(`/api/quiz/questions?${params.toString()}`);
     return {
         ...response,
+        attemptId: String(response.attemptId || ''),
+        expiresAtMs: Number(response.expiresAtMs || 0),
         quizSeed: String(response.quizSeed || ''),
         questionIds: Array.isArray(response.questionIds)
             ? response.questionIds.map((id) => String(id || '')).filter(Boolean)
@@ -185,15 +219,29 @@ async function loadQuizQuestionsFromBackend(chapter, partNumber = 1) {
     };
 }
 
+async function getAppCheckHeaders() {
+    if (!appCheck || typeof appCheck.getToken !== 'function') return {};
+
+    try {
+        const tokenResult = await appCheck.getToken(false);
+        return tokenResult?.token ? { 'X-Firebase-AppCheck': tokenResult.token } : {};
+    } catch (error) {
+        console.warn('Firebase App Check token could not be read:', error);
+        return {};
+    }
+}
+
 async function callBackend(path, options = {}) {
     if (!isBackendEnabled()) throw new Error('Backend API is not configured.');
     if (!auth?.currentUser) throw new Error('You must be signed in before calling the backend.');
 
     const token = await auth.currentUser.getIdToken();
+    const appCheckHeaders = await getAppCheckHeaders();
     const response = await fetch(`${BACKEND_API_BASE_URL}${path}`, {
         method: options.method || 'GET',
         headers: {
             'Authorization': `Bearer ${token}`,
+            ...appCheckHeaders,
             'Content-Type': 'application/json',
             ...(options.headers || {})
         },
@@ -211,16 +259,11 @@ async function callBackend(path, options = {}) {
 function applyCloudProfile(profile = {}) {
     if (!profile) return;
 
-    const profileIsAdmin = typeof profile.isAdmin === 'boolean'
-        ? profile.isAdmin
-        : Boolean(currentUser?.isAdmin);
-    if (!profileIsAdmin) {
-        totalPoints = Number(profile.totalPoints || totalPoints || 0);
-    }
-    testsCompleted = Number(profile.testsCompleted || testsCompleted || 0);
-    totalTimeSpent = Number(profile.totalTimeSpent || totalTimeSpent || 0);
-    totalCorrectAnswers = Number(profile.totalCorrectAnswers || totalCorrectAnswers || 0);
-    totalQuestionsAttempted = Number(profile.totalQuestionsAttempted || totalQuestionsAttempted || 0);
+    totalPoints = getNumericValue(profile.totalPoints, totalPoints);
+    testsCompleted = getNumericValue(profile.testsCompleted, testsCompleted);
+    totalTimeSpent = getNumericValue(profile.totalTimeSpent, totalTimeSpent);
+    totalCorrectAnswers = getNumericValue(profile.totalCorrectAnswers, totalCorrectAnswers);
+    totalQuestionsAttempted = getNumericValue(profile.totalQuestionsAttempted, totalQuestionsAttempted);
 
     if (currentUser) {
         currentUser = {
@@ -232,12 +275,6 @@ function applyCloudProfile(profile = {}) {
             isAdmin: typeof profile.isAdmin === 'boolean' ? profile.isAdmin : currentUser.isAdmin
         };
     }
-}
-
-function createClientAttemptId() {
-    const uid = String(currentUser?.uid || 'guest').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 40);
-    const randomPart = Math.random().toString(36).slice(2, 10);
-    return `${uid || 'guest'}-${Date.now()}-${randomPart}`;
 }
 
 function sanitizeStorageSegment(value, fallback = 'item') {
@@ -278,6 +315,11 @@ function initApp() {
 
     // Keyboard shortcuts
     document.addEventListener('keydown', function(e) {
+        if (e.key === 'Escape' && document.getElementById('withdraw-modal')?.style.display !== 'none') {
+            closeWithdrawModal();
+            return;
+        }
+
         if (e.key === 'Escape' && isHomeSectionTabOpen()) {
             closeHomeSectionTab();
             return;
@@ -366,8 +408,11 @@ function resetUserState() {
     leaderboardFetchedAt = 0;
     adminUsers = [];
     adminAttempts = [];
+    adminWithdrawalRequests = [];
     adminLoadError = '';
     adminPanelVisible = false;
+    isSubmittingWithdrawal = false;
+    updatingWithdrawalRequestIds.clear();
     testHistory = [];
     chapterHistory = {};
     totalPoints = 0;
@@ -381,6 +426,7 @@ function resetUserState() {
     currentPartLabel = '';
     currentQuizSeed = '';
     currentQuestionIds = [];
+    currentQuizAttemptId = '';
     testStartSnapshot = null;
     pausedTestState = null;
     elapsedTimeBeforePauseMs = 0;
@@ -584,7 +630,7 @@ function normalizeAttemptData(rawAttempt = {}, userMeta = {}) {
         timeSpent: Number(rawAttempt.timeSpent || 0),
         userId: rawAttempt.userId || userMeta.uid || '',
         userName: rawAttempt.userName || userMeta.name || 'Student',
-        userAvatar: rawAttempt.userAvatar || userMeta.avatar || '🎓'
+        userAvatar: rawAttempt.userAvatar || userMeta.avatar || DISPLAY_AVATARS[0]
     };
 
     attempt.cheatLog = normalizeCheatLog(rawAttempt.cheatLog, attempt);
@@ -1387,7 +1433,7 @@ function formatDateTime(timestamp) {
 function formatQuestionTimes(questionTimes = []) {
     const normalized = normalizeQuestionTimes(questionTimes);
     if (normalized.length === 0) return 'No answered questions recorded.';
-    return normalized.map((entry) => `Q${entry.questionNumber}: ${entry.secondsTaken}s`).join(' · ');
+    return normalized.map((entry) => `Q${entry.questionNumber}: ${entry.secondsTaken}s`).join(' | ');
 }
 
 function getSafeRecordingUrl(url) {
@@ -1769,7 +1815,7 @@ function getAdminRecordingGroups(recordingAttempts = adminAttempts, options = {}
             groupsByUser.set(userId, {
                 id: userId,
                 name: userMeta.name || attempt.userName || 'Student',
-                avatar: userMeta.avatar || attempt.userAvatar || AVATARS[0],
+                avatar: userMeta.avatar || attempt.userAvatar || DISPLAY_AVATARS[0],
                 chapters: new Map(),
                 recordingCount: 0
             });
@@ -1888,7 +1934,7 @@ function normalizeRecordingDocumentForAdminGroup(recording = {}) {
         recordingAttemptId: attemptId,
         userId: recording.studentId || matchedAttempt.userId || '',
         userName: recording.userName || matchedAttempt.userName || 'Student',
-        userAvatar: recording.userAvatar || matchedAttempt.userAvatar || AVATARS[0],
+        userAvatar: recording.userAvatar || matchedAttempt.userAvatar || DISPLAY_AVATARS[0],
         chapter: recording.chapter || matchedAttempt.chapter || getRecordingChapterFallback(recording),
         partNumber,
         partLabel: recording.partLabel || matchedAttempt.partLabel || (partNumber ? `Part ${partNumber}` : 'Chapter attempt'),
@@ -1967,7 +2013,7 @@ function renderAdminRecordingGroups(recordingGroups = []) {
             <details class="admin-recording-user">
                 <summary>
                     <span class="admin-recording-user-main">
-                        <span class="lb-avatar">${escapeHtml(group.avatar || AVATARS[0])}</span>
+                        <span class="lb-avatar">${escapeHtml(group.avatar || DISPLAY_AVATARS[0])}</span>
                         <span>
                             <strong>${escapeHtml(group.name || 'Student')}</strong>
                             <small>${escapeHtml(group.id.slice(0, 16) || 'No UID')} | ${chapterLabel}</small>
@@ -2155,7 +2201,7 @@ async function ensureUserProfile(authUser) {
     const profile = {
         uid: authUser.uid,
         name: existing.name || getDefaultDisplayName(authUser, seed.name),
-        avatar: existing.avatar || seed.avatar || AVATARS[0],
+        avatar: existing.avatar || seed.avatar || DISPLAY_AVATARS[0],
         totalPoints: Number(existing.totalPoints || 0),
         testsCompleted: Number(existing.testsCompleted || 0),
         totalTimeSpent: Number(existing.totalTimeSpent || 0),
@@ -2252,18 +2298,193 @@ async function loadCloudData() {
     ]);
 
     const userData = userSnapshot.exists ? userSnapshot.data() : {};
-    if (!currentUser?.isAdmin) {
-        totalPoints = Number(userData.totalPoints || 0);
-    }
-    testsCompleted = Number(userData.testsCompleted || 0);
-    totalTimeSpent = Number(userData.totalTimeSpent || 0);
-    totalCorrectAnswers = Number(userData.totalCorrectAnswers || 0);
-    totalQuestionsAttempted = Number(userData.totalQuestionsAttempted || 0);
+    totalPoints = getNumericValue(userData.totalPoints);
+    testsCompleted = getNumericValue(userData.testsCompleted);
+    totalTimeSpent = getNumericValue(userData.totalTimeSpent);
+    totalCorrectAnswers = getNumericValue(userData.totalCorrectAnswers);
+    totalQuestionsAttempted = getNumericValue(userData.totalQuestionsAttempted);
 
     testHistory = attemptsSnapshot.docs
         .map((docSnapshot) => normalizeAttemptData(docSnapshot.data(), currentUser))
         .sort((a, b) => a.timestamp - b.timestamp);
     chapterHistory = buildChapterHistoryFromAttempts(testHistory);
+}
+
+function normalizeWithdrawalRequest(raw = {}) {
+    return {
+        id: String(raw.id || ''),
+        userId: String(raw.userId || ''),
+        userName: String(raw.userName || raw.name || 'Student'),
+        email: String(raw.email || ''),
+        phone: String(raw.phone || ''),
+        upiId: String(raw.upiId || ''),
+        walletBalance: getNumericValue(raw.walletBalance),
+        requestedPoints: getNumericValue(raw.requestedPoints),
+        status: WITHDRAWAL_STATUSES.includes(String(raw.status || 'Pending')) ? String(raw.status || 'Pending') : 'Pending',
+        requestDateTime: getTimestampMs(raw.requestDateTime || raw.requestedAtMs || raw.requestedAt, Date.now()),
+        updatedAtMs: getTimestampMs(raw.updatedAtMs || raw.updatedAt, 0),
+        updatedBy: String(raw.updatedBy || '')
+    };
+}
+
+function getWalletBalance() {
+    return getNumericValue(totalPoints);
+}
+
+function formatPointAmount(value) {
+    return Math.round(getNumericValue(value)).toLocaleString('en-US');
+}
+
+function setWithdrawalStatus(message = '', type = '') {
+    const statusEl = document.getElementById('withdraw-status');
+    if (!statusEl) return;
+    statusEl.textContent = message;
+    statusEl.className = type ? `withdraw-status ${type}` : 'withdraw-status';
+}
+
+function updateWithdrawButtonState() {
+    const btn = document.getElementById('withdraw-btn');
+    if (!btn) return;
+    btn.disabled = !currentUser;
+    btn.title = currentUser
+        ? 'Request withdrawal'
+        : 'Sign in to request withdrawal';
+}
+
+function renderWithdrawalEligibility() {
+    const walletBalance = getWalletBalance();
+    const submitBtn = document.getElementById('withdraw-submit-btn');
+    const amountInput = document.getElementById('withdraw-points');
+    const phoneInput = document.getElementById('withdraw-phone');
+    const upiInput = document.getElementById('withdraw-upi');
+    const canWithdraw = walletBalance >= MIN_WITHDRAWAL_POINTS;
+
+    if (amountInput) {
+        amountInput.disabled = !canWithdraw || isSubmittingWithdrawal;
+        amountInput.max = String(Math.floor(walletBalance));
+        if (!amountInput.value && canWithdraw) {
+            amountInput.value = String(MIN_WITHDRAWAL_POINTS);
+        }
+    }
+    if (phoneInput) phoneInput.disabled = !canWithdraw || isSubmittingWithdrawal;
+    if (upiInput) upiInput.disabled = !canWithdraw || isSubmittingWithdrawal;
+    if (submitBtn) submitBtn.disabled = !canWithdraw || isSubmittingWithdrawal;
+
+    if (!canWithdraw) {
+        setWithdrawalStatus('Minimum 10,000 points required to request withdrawal.', 'error');
+    }
+}
+
+function openWithdrawModal() {
+    if (!currentUser) {
+        showPointsNotification('Please sign in to request withdrawal.', 'points-lost');
+        return;
+    }
+
+    const modal = document.getElementById('withdraw-modal');
+    if (!modal) return;
+
+    const walletBalance = getWalletBalance();
+    const now = new Date();
+    const nameInput = document.getElementById('withdraw-name');
+    const emailInput = document.getElementById('withdraw-email');
+    const walletInput = document.getElementById('withdraw-wallet');
+    const dateInput = document.getElementById('withdraw-date');
+    const statusInput = document.getElementById('withdraw-current-status');
+    const amountInput = document.getElementById('withdraw-points');
+
+    if (nameInput) nameInput.value = currentUser.name || 'Student';
+    if (emailInput) emailInput.value = currentUser.email || auth?.currentUser?.email || '';
+    if (walletInput) walletInput.value = `${formatPointAmount(walletBalance)} points`;
+    if (dateInput) dateInput.value = formatDateTime(now.getTime());
+    if (statusInput) statusInput.value = 'Pending';
+    if (amountInput) amountInput.value = walletBalance >= MIN_WITHDRAWAL_POINTS ? String(MIN_WITHDRAWAL_POINTS) : '';
+
+    setWithdrawalStatus('');
+    modal.style.display = 'flex';
+    renderWithdrawalEligibility();
+    setTimeout(() => {
+        const firstField = walletBalance >= MIN_WITHDRAWAL_POINTS
+            ? document.getElementById('withdraw-phone')
+            : document.querySelector('.withdraw-close');
+        firstField?.focus();
+    }, 0);
+}
+
+function closeWithdrawModal() {
+    const modal = document.getElementById('withdraw-modal');
+    if (modal) modal.style.display = 'none';
+    isSubmittingWithdrawal = false;
+    renderWithdrawalEligibility();
+}
+
+async function submitWithdrawalRequest(event) {
+    if (event) event.preventDefault();
+    if (isSubmittingWithdrawal) return;
+
+    if (!currentUser) {
+        setWithdrawalStatus('You must be logged in to request withdrawal.', 'error');
+        return;
+    }
+
+    const walletBalance = getWalletBalance();
+    const phone = String(document.getElementById('withdraw-phone')?.value || '').trim();
+    const upiId = String(document.getElementById('withdraw-upi')?.value || '').trim();
+    const requestedPoints = Math.round(Number(document.getElementById('withdraw-points')?.value || 0));
+
+    if (walletBalance < MIN_WITHDRAWAL_POINTS) {
+        setWithdrawalStatus('Minimum 10,000 points required to request withdrawal.', 'error');
+        renderWithdrawalEligibility();
+        return;
+    }
+
+    if (!phone) {
+        setWithdrawalStatus('Phone number is required.', 'error');
+        document.getElementById('withdraw-phone')?.focus();
+        return;
+    }
+
+    if (!upiId) {
+        setWithdrawalStatus('UPI ID is required.', 'error');
+        document.getElementById('withdraw-upi')?.focus();
+        return;
+    }
+
+    if (!Number.isFinite(requestedPoints) || requestedPoints < MIN_WITHDRAWAL_POINTS) {
+        setWithdrawalStatus('Enter at least 10,000 withdrawal points.', 'error');
+        document.getElementById('withdraw-points')?.focus();
+        return;
+    }
+
+    if (requestedPoints > walletBalance) {
+        setWithdrawalStatus('Withdrawal points cannot be greater than your current wallet balance.', 'error');
+        document.getElementById('withdraw-points')?.focus();
+        return;
+    }
+
+    isSubmittingWithdrawal = true;
+    renderWithdrawalEligibility();
+    setWithdrawalStatus('Submitting withdrawal request...', '');
+
+    try {
+        const response = await callBackend('/api/withdrawals', {
+            method: 'POST',
+            body: { phone, upiId, requestedPoints }
+        });
+        const request = normalizeWithdrawalRequest(response.withdrawalRequest || {});
+        if (currentUser?.isAdmin && request.id) {
+            adminWithdrawalRequests = [request, ...adminWithdrawalRequests.filter((entry) => entry.id !== request.id)];
+            renderAdminDashboard();
+        }
+        setWithdrawalStatus('Withdrawal request submitted successfully. Admin will verify and approve it.', 'success');
+        showPointsNotification('Withdrawal request submitted successfully. Admin will verify and approve it.', 'points-added');
+    } catch (error) {
+        console.error('Withdrawal request failed:', error);
+        setWithdrawalStatus(error.message || 'Withdrawal request failed. Please try again.', 'error');
+    } finally {
+        isSubmittingWithdrawal = false;
+        renderWithdrawalEligibility();
+    }
 }
 
 async function loadAdminDashboardData() {
@@ -2276,6 +2497,9 @@ async function loadAdminDashboardData() {
             adminUsers = Array.isArray(response.users) ? response.users : [];
             adminAttempts = Array.isArray(response.attempts)
                 ? response.attempts.map((attempt) => normalizeAttemptData(attempt))
+                : [];
+            adminWithdrawalRequests = Array.isArray(response.withdrawalRequests)
+                ? response.withdrawalRequests.map((request) => normalizeWithdrawalRequest(request))
                 : [];
             adminLoadError = '';
             renderAdminDashboard();
@@ -2303,7 +2527,7 @@ async function loadAdminDashboardData() {
     const userMetaById = new Map(adminUsers.map((user) => [user.id, {
         uid: user.id,
         name: user.name || 'Student',
-        avatar: user.avatar || AVATARS[0]
+        avatar: user.avatar || DISPLAY_AVATARS[0]
     }]));
 
     try {
@@ -2311,6 +2535,20 @@ async function loadAdminDashboardData() {
     } catch (error) {
         console.warn('Collection-group attempt query failed; falling back to per-user attempt reads.', error);
         adminAttempts = await loadAdminAttemptsByUser(usersSnapshot, userMetaById);
+    }
+
+    try {
+        const withdrawalSnapshot = await db.collection('withdrawalRequests')
+            .orderBy('requestedAtMs', 'desc')
+            .limit(150)
+            .get();
+        adminWithdrawalRequests = withdrawalSnapshot.docs.map((docSnapshot) => normalizeWithdrawalRequest({
+            id: docSnapshot.id,
+            ...docSnapshot.data()
+        }));
+    } catch (error) {
+        console.warn('Withdrawal request load failed:', error);
+        adminWithdrawalRequests = [];
     }
 
     adminLoadError = '';
@@ -2344,6 +2582,83 @@ async function refreshAdminDashboard() {
     }
 }
 
+function renderAdminWithdrawalRequests(container) {
+    if (!container) return;
+
+    if (!adminWithdrawalRequests.length) {
+        container.innerHTML = '<div class="admin-empty">No withdrawal requests yet.</div>';
+        return;
+    }
+
+    container.innerHTML = adminWithdrawalRequests.map((request) => {
+        const safeId = escapeHtml(request.id);
+        const isUpdating = updatingWithdrawalRequestIds.has(request.id);
+        const options = WITHDRAWAL_STATUSES.map((status) => `
+            <option value="${status}" ${request.status === status ? 'selected' : ''}>${status}</option>
+        `).join('');
+
+        return `
+            <div class="admin-attempt-card admin-withdrawal-card">
+                <div class="admin-attempt-head">
+                    <div>
+                        <strong>${escapeHtml(request.userName || 'Student')}</strong>
+                        <div class="admin-meta">${escapeHtml(request.email || 'No email')} | ${escapeHtml(request.phone || 'No phone')}</div>
+                    </div>
+                    <div class="admin-attempt-score">
+                        <span class="admin-chip ${request.status === 'Rejected' ? 'danger' : 'success'}">${escapeHtml(request.status)}</span>
+                        <strong>${formatPointAmount(request.requestedPoints)} points</strong>
+                    </div>
+                </div>
+                <div class="admin-withdrawal-grid">
+                    <div><span>User ID</span>${escapeHtml(request.userId || 'Unknown')}</div>
+                    <div><span>UPI ID</span>${escapeHtml(request.upiId || 'Missing')}</div>
+                    <div><span>Wallet balance</span>${formatPointAmount(request.walletBalance)} points</div>
+                    <div><span>Requested points</span>${formatPointAmount(request.requestedPoints)} points</div>
+                    <div><span>Request date/time</span>${formatDateTime(request.requestDateTime)}</div>
+                    <div><span>Updated by</span>${escapeHtml(request.updatedBy || 'Not updated yet')}</div>
+                </div>
+                <div class="admin-withdrawal-actions">
+                    <select class="withdraw-status-select" onchange="updateWithdrawalRequestStatus('${safeId}', this.value)" ${isUpdating ? 'disabled' : ''}>
+                        ${options}
+                    </select>
+                </div>
+            </div>
+        `;
+    }).join('');
+}
+
+async function updateWithdrawalRequestStatus(requestId, status) {
+    if (!currentUser?.isAdmin) {
+        showPointsNotification('Admin access required to update withdrawal requests.', 'points-lost');
+        return;
+    }
+
+    const safeStatus = WITHDRAWAL_STATUSES.includes(status) ? status : 'Pending';
+    const safeRequestId = String(requestId || '').trim();
+    if (!safeRequestId) return;
+
+    updatingWithdrawalRequestIds.add(safeRequestId);
+    renderAdminDashboard();
+
+    try {
+        const response = await callBackend(`/api/admin/withdrawals/${encodeURIComponent(safeRequestId)}/status`, {
+            method: 'PATCH',
+            body: { status: safeStatus }
+        });
+        const updated = normalizeWithdrawalRequest(response.withdrawalRequest || {});
+        adminWithdrawalRequests = adminWithdrawalRequests.map((request) => (
+            request.id === safeRequestId ? updated : request
+        ));
+        showPointsNotification(`Withdrawal status updated to ${safeStatus}.`, 'points-added');
+    } catch (error) {
+        console.error('Failed to update withdrawal status:', error);
+        showPointsNotification(error.message || 'Could not update withdrawal status.', 'points-lost');
+    } finally {
+        updatingWithdrawalRequestIds.delete(safeRequestId);
+        renderAdminDashboard();
+    }
+}
+
 function renderAdminDashboard() {
     const panel = document.getElementById('admin-panel');
     const toggleBtn = document.getElementById('admin-toggle-btn');
@@ -2351,6 +2666,7 @@ function renderAdminDashboard() {
     const summaryGrid = document.getElementById('admin-summary-grid');
     const usersList = document.getElementById('admin-users-list');
     const recordingsList = document.getElementById('admin-recordings-list');
+    const withdrawalsList = document.getElementById('admin-withdrawal-requests-list');
     const leaderboardList = document.getElementById('admin-leaderboard-list');
     const attemptsList = document.getElementById('admin-attempts-list');
 
@@ -2378,13 +2694,13 @@ function renderAdminDashboard() {
         if (adminLoadError) {
             statusEl.textContent = adminLoadError;
             statusEl.className = 'auth-status error';
-        } else if (adminUsers.length === 0 && adminAttempts.length === 0) {
+        } else if (adminUsers.length === 0 && adminAttempts.length === 0 && adminWithdrawalRequests.length === 0) {
             statusEl.textContent = 'Loading admin dashboard data...';
             statusEl.className = 'auth-status';
         } else {
-            statusEl.textContent = `${adminUsers.length} users loaded · ${adminAttempts.length} recent attempts monitored`;
             const recordingCount = adminAttempts.filter((attempt) => getSafeRecordingUrl(attempt.recordingUrl)).length;
-            statusEl.textContent = `${adminUsers.length} users loaded | ${adminAttempts.length} attempt records loaded | ${recordingCount} recordings`;
+            const pendingWithdrawals = adminWithdrawalRequests.filter((request) => request.status === 'Pending').length;
+            statusEl.textContent = `${adminUsers.length} users loaded | ${adminAttempts.length} attempt records loaded | ${recordingCount} recordings | ${pendingWithdrawals} pending withdrawals`;
             statusEl.className = 'auth-status success';
         }
     }
@@ -2392,6 +2708,7 @@ function renderAdminDashboard() {
     if (summaryGrid) {
         const suspiciousAttempts = adminAttempts.filter((attempt) => attempt.cheatLog.flagged).length;
         const highestTabSwitches = adminAttempts.reduce((max, attempt) => Math.max(max, attempt.cheatLog.tabSwitchCount), 0);
+        const pendingWithdrawals = adminWithdrawalRequests.filter((request) => request.status === 'Pending').length;
         summaryGrid.innerHTML = `
             <div class="stat-card">
                 <div class="stat-number">${adminUsers.length}</div>
@@ -2409,6 +2726,10 @@ function renderAdminDashboard() {
                 <div class="stat-number">${highestTabSwitches}</div>
                 <div>Highest Tab Switches</div>
             </div>
+            <div class="stat-card">
+                <div class="stat-number">${pendingWithdrawals}</div>
+                <div>Pending Withdrawals</div>
+            </div>
         `;
     }
 
@@ -2419,13 +2740,13 @@ function renderAdminDashboard() {
             usersList.className = 'admin-user-list';
             usersList.innerHTML = adminUsers.map((user) => `
                 <div class="leaderboard-item">
-                    <div class="lb-avatar">${user.avatar || '🎓'}</div>
+                    <div class="lb-avatar">${escapeHtml(user.avatar || DISPLAY_AVATARS[0])}</div>
                     <div class="lb-info">
                         <strong>${escapeHtml(user.name || 'Student')}</strong>
-                        <span>${escapeHtml((user.uid || user.id || '').slice(0, 12) || 'No UID')} · ${Number(user.testsCompleted || 0)} tests</span>
+                        <span>${escapeHtml((user.uid || user.id || '').slice(0, 12) || 'No UID')} | ${Number(user.testsCompleted || 0)} tests</span>
                     </div>
                     <div class="lb-score">
-                        <strong>💰 ${Number(user.totalPoints || 0)}</strong>
+                        <strong>Cash ${Number(user.totalPoints || 0)}</strong>
                         <span>${getAccuracyText(user.totalCorrectAnswers, user.totalQuestionsAttempted)}</span>
                     </div>
                 </div>
@@ -2437,6 +2758,10 @@ function renderAdminDashboard() {
         renderAdminRecordingLibrary(recordingsList);
     }
 
+    if (withdrawalsList) {
+        renderAdminWithdrawalRequests(withdrawalsList);
+    }
+
     if (leaderboardList) {
         if (adminUsers.length === 0) {
             leaderboardList.innerHTML = '<div class="admin-empty">Leaderboard data will appear after users complete tests.</div>';
@@ -2446,13 +2771,13 @@ function renderAdminDashboard() {
             leaderboardList.innerHTML = adminUsers.slice(0, 10).map((user, index) => `
                 <div class="leaderboard-item rank-${index < 3 ? index + 1 : 'other'}">
                     <div class="lb-rank">${medals[index] || `#${index + 1}`}</div>
-                    <div class="lb-avatar">${user.avatar || '🎓'}</div>
+                    <div class="lb-avatar">${escapeHtml(user.avatar || DISPLAY_AVATARS[0])}</div>
                     <div class="lb-info">
                         <strong>${escapeHtml(user.name || 'Student')}</strong>
-                        <span>${Number(user.testsCompleted || 0)} tests · ${formatTimeSpent(Number(user.totalTimeSpent || 0))}</span>
+                        <span>${Number(user.testsCompleted || 0)} tests | ${formatTimeSpent(Number(user.totalTimeSpent || 0))}</span>
                     </div>
                     <div class="lb-score">
-                        <strong>💰 ${Number(user.totalPoints || 0)}</strong>
+                        <strong>Cash ${Number(user.totalPoints || 0)}</strong>
                         <span>${getAccuracyText(user.totalCorrectAnswers, user.totalQuestionsAttempted)}</span>
                     </div>
                 </div>
@@ -2468,19 +2793,19 @@ function renderAdminDashboard() {
                 const flagClass = attempt.cheatLog.flagged ? 'danger' : 'success';
                 const flagLabel = attempt.cheatLog.flagged ? 'Suspicious Attempt' : 'Clean Attempt';
                 const reasons = attempt.cheatLog.reasons.length
-                    ? escapeHtml(attempt.cheatLog.reasons.join(' · '))
+                    ? escapeHtml(attempt.cheatLog.reasons.join(' | '))
                     : 'No suspicious signals recorded.';
 
                 return `
                     <div class="admin-attempt-card ${attempt.cheatLog.flagged ? 'flagged' : ''}">
                         <div class="admin-attempt-head">
                             <div>
-                                <strong>${attempt.userAvatar || '🎓'} ${escapeHtml(attempt.userName || 'Student')}</strong>
-                                <div class="admin-meta">${escapeHtml(attempt.chapter)} · ${formatDateTime(attempt.timestamp)}</div>
+                                <strong>${escapeHtml(attempt.userAvatar || DISPLAY_AVATARS[0])} ${escapeHtml(attempt.userName || 'Student')}</strong>
+                                <div class="admin-meta">${escapeHtml(attempt.chapter)} | ${formatDateTime(attempt.timestamp)}</div>
                             </div>
                             <div class="admin-attempt-score">
                                 <span class="admin-chip ${flagClass}">${flagLabel}</span>
-                                <strong>${attempt.score}/${attempt.total} · 💰 ${attempt.points}</strong>
+                                <strong>${attempt.score}/${attempt.total} | Cash ${attempt.points}</strong>
                             </div>
                         </div>
                         <div class="admin-chip-row">
@@ -2511,6 +2836,7 @@ async function openHomeForAuthenticatedUser(authUser) {
         await loadCloudData();
         adminUsers = [];
         adminAttempts = [];
+        adminWithdrawalRequests = [];
         adminLoadError = '';
         adminPanelVisible = Boolean(currentUser.isAdmin);
         resetAuthInputs();
@@ -2561,13 +2887,13 @@ function showLoginScreen() {
     setHomeSidebarButtonVisible(false);
 
     const grid = document.getElementById('avatar-grid');
-    grid.innerHTML = AVATARS.map(a =>
+    grid.innerHTML = DISPLAY_AVATARS.map(a =>
         `<div class="avatar-option" onclick="pickAvatar(this, '${a}')">${a}</div>`
     ).join('');
 
     // Select first by default
     const firstOption = grid.querySelector('.avatar-option');
-    if (firstOption) { firstOption.classList.add('selected'); selectedAvatar = AVATARS[0]; }
+    if (firstOption) { firstOption.classList.add('selected'); selectedAvatar = DISPLAY_AVATARS[0]; }
 }
 
 function pickAvatar(el, avatar) {
@@ -2662,10 +2988,6 @@ async function showHomeScreen() {
     setAuthStatus('Loading quiz content...', 'success');
     await ensureQuestionCatalogLoaded();
 
-    if (currentUser?.isAdmin) {
-        totalPoints = 0;
-    }
-
     document.getElementById('login-screen').style.display = 'none';
     document.getElementById('home').style.display = 'block';
     document.getElementById('quiz').style.display = 'none';
@@ -2711,7 +3033,7 @@ function isHomeSectionTabOpen() {
 }
 
 function updateHomeSidebarUser() {
-    const avatar = currentUser?.avatar || AVATARS[0];
+    const avatar = currentUser?.avatar || DISPLAY_AVATARS[0];
     const name = currentUser?.name || 'Student';
     const email = currentUser?.email || auth?.currentUser?.email || 'Signed in';
 
@@ -2777,8 +3099,8 @@ function getHomeSidebarSectionTitle(sectionId) {
 function getHomeSidebarSectionHtml(sectionId) {
     if (sectionId === 'edit-profile') {
         const currentName = escapeHtml(currentUser?.name || '');
-        const currentAvatar = currentUser?.avatar || AVATARS[0];
-        const avatarOptions = AVATARS.map((avatar) => `
+        const currentAvatar = currentUser?.avatar || DISPLAY_AVATARS[0];
+        const avatarOptions = DISPLAY_AVATARS.map((avatar) => `
             <button class="sidebar-avatar-option ${avatar === currentAvatar ? 'selected' : ''}" data-avatar="${escapeHtml(avatar)}" onclick="selectSidebarAvatar(this)" type="button">
                 ${escapeHtml(avatar)}
             </button>
@@ -3014,7 +3336,7 @@ function openHomeSidebarSection(sectionId = 'edit-profile') {
 }
 
 function selectSidebarAvatar(button) {
-    selectedSidebarAvatar = button?.getAttribute('data-avatar') || currentUser?.avatar || AVATARS[0];
+    selectedSidebarAvatar = button?.getAttribute('data-avatar') || currentUser?.avatar || DISPLAY_AVATARS[0];
     document.querySelectorAll('.sidebar-avatar-option').forEach((option) => {
         option.classList.toggle('selected', option === button);
     });
@@ -3024,7 +3346,7 @@ async function saveSidebarProfile() {
     const status = document.getElementById('sidebar-section-status');
     const input = document.getElementById('sidebar-profile-name-input');
     const name = String(input?.value || '').trim();
-    const avatar = selectedSidebarAvatar || currentUser?.avatar || AVATARS[0];
+    const avatar = selectedSidebarAvatar || currentUser?.avatar || DISPLAY_AVATARS[0];
 
     if (!name) {
         if (status) {
@@ -3160,7 +3482,7 @@ function openChapterParts(ch) {
             <button class="part-option ${isPausedPart ? 'paused' : ''}" onclick='startTest(${escapeHtml(JSON.stringify(ch))}, ${partNumber})'>
                 <span class="part-number">Part ${partNumber}</span>
                 <span class="part-range">Random set from ${totalQs} questions</span>
-                <span class="part-count">${info.questionCount} questions${isPausedPart ? ' · Resume available' : ''}</span>
+                <span class="part-count">${info.questionCount} questions${isPausedPart ? ' | Resume available' : ''}</span>
                 <span class="part-action"><i class="fas fa-play"></i> ${isPausedPart ? 'Resume Test' : 'Start Test'}</span>
             </button>`;
     }).join('');
@@ -3357,13 +3679,13 @@ function renderLeaderboard() {
     container.innerHTML = leaderboard.slice(0, 10).map((e, i) => `
         <div class="leaderboard-item rank-${i < 3 ? i+1 : 'other'}">
             <div class="lb-rank">${medals[i] || `#${i+1}`}</div>
-            <div class="lb-avatar">${e.avatar || '🎓'}</div>
+            <div class="lb-avatar">${escapeHtml(e.avatar || DISPLAY_AVATARS[0])}</div>
             <div class="lb-info">
                 <strong>${escapeHtml(e.name || 'Student')}</strong>
-                <span>${Number(e.testsCompleted || 0)} tests · ${getAccuracyText(e.totalCorrectAnswers, e.totalQuestionsAttempted)}</span>
+                <span>${Number(e.testsCompleted || 0)} tests | ${getAccuracyText(e.totalCorrectAnswers, e.totalQuestionsAttempted)}</span>
             </div>
             <div class="lb-score">
-                <strong style="color:var(--warning)">💰 ${Number(e.totalPoints || 0)}</strong>
+                <strong style="color:var(--warning)">Cash ${Number(e.totalPoints || 0)}</strong>
                 <span>${formatTimeSpent(Number(e.totalTimeSpent || 0))}</span>
             </div>
         </div>
@@ -3639,7 +3961,7 @@ function generateChapterList() {
                 <div class="chapter-number">${num++}</div>
                 <h3 style="padding-top:0.5rem;">${ch}</h3>
                 <div class="chapter-info">
-                    <p style="color:var(--text-secondary)">${totalQs} questions available · ${partCount} parts · ${perAttemptQs} per part</p>
+                    <p style="color:var(--text-secondary)">${totalQs} questions available | ${partCount} parts | ${perAttemptQs} per part</p>
                     ${isPaused ? '<p style="color:var(--warning);font-weight:700;margin-top:0.5rem;">Resume available</p>' : ''}
                     <div class="chapter-stats">
                         <div class="stat-item">
@@ -3698,12 +4020,12 @@ function updateHistory() {
             <div class="leaderboard-item">
                 <div>
                     <strong>${escapeHtml(attempt.chapter)}</strong>
-                    <div style="font-size:0.85rem;color:rgba(255,255,255,0.6);">${escapeHtml(attempt.partLabel || 'Full Attempt')} · ${formatDateTime(attempt.timestamp)}</div>
+                    <div style="font-size:0.85rem;color:rgba(255,255,255,0.6);">${escapeHtml(attempt.partLabel || 'Full Attempt')} | ${formatDateTime(attempt.timestamp)}</div>
                     ${suspiciousText}
                 </div>
                 <div style="text-align:right;">
                     <div style="font-weight:700;color:var(--success);">${attempt.score}/${attempt.total}</div>
-                    <div style="font-size:0.85rem;color:rgba(255,255,255,0.6);">💰 ${attempt.points}</div>
+                    <div style="font-size:0.85rem;color:rgba(255,255,255,0.6);">Cash ${attempt.points}</div>
                 </div>
             </div>`;
     });
@@ -3750,6 +4072,10 @@ async function startTest(ch, partNumber = 1) {
             alert('No questions are available for this part yet.');
             return;
         }
+        if (!quizPayload.attemptId) {
+            alert('The backend did not issue a quiz attempt. Please refresh and try again.');
+            return;
+        }
     }
 
     const acceptedRecordingInstructions = await showPreQuizRecordingInstructions();
@@ -3772,6 +4098,13 @@ async function startTest(ch, partNumber = 1) {
             currentPartNumber = pausedTestState.partNumber || partInfo.partNumber;
             currentPartLabel = pausedTestState.partLabel || partInfo.label;
             currentQuizSeed = String(pausedTestState.quizSeed || '');
+            currentQuizAttemptId = String(pausedTestState.quizAttemptId || pausedTestState.clientAttemptId || '');
+            if (!currentQuizAttemptId) {
+                pausedTestState = null;
+                stopCamera();
+                alert('This paused test must be restarted because it was not issued by the backend.');
+                return;
+            }
             currentQuestionIds = Array.isArray(pausedTestState.questionIds)
                 ? pausedTestState.questionIds.map((id) => String(id || '')).filter(Boolean)
                 : [];
@@ -3804,6 +4137,7 @@ async function startTest(ch, partNumber = 1) {
     currentPartNumber    = Number(activePartInfo.partNumber || partInfo.partNumber);
     currentPartLabel     = activePartInfo.label || partInfo.label;
     qList = Array.isArray(quizPayload?.questions) ? quizPayload.questions.map(cloneQuizQuestion) : [];
+    currentQuizAttemptId = String(quizPayload?.attemptId || '');
     currentQuizSeed = String(quizPayload?.quizSeed || '');
     currentQuestionIds = Array.isArray(quizPayload?.questionIds) && quizPayload.questionIds.length > 0
         ? quizPayload.questionIds.map((id) => String(id || '')).filter(Boolean)
@@ -3836,6 +4170,15 @@ async function startTest(ch, partNumber = 1) {
 
     if (!(await startRecording())) {
         stopCamera();
+        return;
+    }
+    if (!currentQuizAttemptId) {
+        alert('The backend-issued quiz attempt is missing. Please start the quiz again.');
+        stopCamera();
+        home.style.display = 'block';
+        quiz.style.display = 'none';
+        result.style.display = 'none';
+        setHomeSidebarButtonVisible(true);
         return;
     }
 
@@ -3878,17 +4221,11 @@ function loadQ() {
         const sel      = answers[index] === i;
         let cls = 'option';
         if (isLocked) {
-            const showDemoFeedback = isLiveCashDemoQuiz() && answers[index] !== null;
-            if (showDemoFeedback && sel) {
-                cls += answers[index] === q.a ? ' correct' : ' incorrect';
-            } else if (showDemoFeedback && answers[index] !== q.a && i === q.a) {
-                cls += ' correct';
-            } else if (sel) {
+            if (sel) {
                 cls += ' selected';
             } else {
                 cls += ' disabled';
             }
-            if (!sel) cls += ' disabled';
         } else if (sel) { cls += ' selected'; }
 
         html += `<div class="${cls}" onclick="selectOption(${i})">
@@ -3900,49 +4237,6 @@ function loadQ() {
     highlightNav();
     updateButtonStates();
     updateMarkButton();
-}
-
-function isLiveCashDemoQuiz() {
-    return false;
-}
-
-function applyLiveCashDemoFeedback(selectedIndex) {
-    if (!isLiveCashDemoQuiz()) return;
-
-    const question = qList[index];
-    if (!question) return;
-
-    const isCorrect = selectedIndex === question.a;
-    const latestCheatEntry = cheatLog?.questionTimes?.[cheatLog.questionTimes.length - 1];
-    if (latestCheatEntry) latestCheatEntry.correct = isCorrect;
-
-    const opts = document.querySelectorAll('.option');
-    opts.forEach((optEl, optIndex) => {
-        if (optIndex === selectedIndex) {
-            optEl.classList.add(isCorrect ? 'correct' : 'incorrect');
-        } else if (!isCorrect && optIndex === question.a) {
-            optEl.classList.add('correct');
-        }
-    });
-
-    if (isCorrect) {
-        liveDemoWalletBalance += POINTS_PER_QUESTION;
-        sessionPoints += POINTS_PER_QUESTION;
-        showPointsNotification(`+${POINTS_PER_QUESTION} cash added for the correct answer`, 'points-added');
-        playCorrectSound();
-        createConfetti();
-        return;
-    }
-
-    const deduction = Math.min(INCORRECT_POINTS_PENALTY, Math.max(0, liveDemoWalletBalance));
-    if (deduction > 0) {
-        liveDemoWalletBalance -= deduction;
-        sessionPoints -= deduction;
-        showPointsNotification(`-${deduction} cash subtracted for the wrong answer`, 'points-lost');
-    } else {
-        showPointsNotification('Wrong answer. Cash balance is already 0, so nothing was deducted.', 'points-lost');
-    }
-    playWrongSound();
 }
 
 function selectOption(i) {
@@ -3973,7 +4267,6 @@ function selectOption(i) {
     });
     if (opts[i]) opts[i].style.animation = 'bounceIn 0.5s ease';
 
-    applyLiveCashDemoFeedback(i);
     updateWallet();
     highlightNav();
     updateButtonStates();
@@ -4002,6 +4295,7 @@ function showPointsNotification(message, type) {
 
 function updateWallet() {
     const el = document.getElementById('points');
+    updateWithdrawButtonState();
     if (!el) return;
 
     const quizEl = document.getElementById('quiz');
@@ -4010,11 +4304,7 @@ function updateWallet() {
         && quizEl.style.display !== 'none'
         && testStartSnapshot
     );
-    const showLiveDemoCash = maskPointsDuringTest && isLiveCashDemoQuiz();
-
-    el.innerText = showLiveDemoCash
-        ? liveDemoWalletBalance
-        : maskPointsDuringTest
+    el.innerText = maskPointsDuringTest
         ? getCashEarnedDisplayValue(testStartSnapshot.totalPoints)
         : getCashEarnedDisplayValue();
 }
@@ -4118,6 +4408,7 @@ function saveCurrentTestProgress(options = {}) {
         chapter: currentChapter,
         partNumber: currentPartNumber,
         partLabel: currentPartLabel,
+        quizAttemptId: currentQuizAttemptId,
         quizSeed: currentQuizSeed,
         questionIds: [...currentQuestionIds],
         difficulty: currentDifficulty,
@@ -4155,7 +4446,14 @@ function resumePausedTest() {
     currentChapter       = pausedTestState.chapter;
     currentPartNumber    = pausedTestState.partNumber || 1;
     currentPartLabel     = pausedTestState.partLabel || getChapterPartInfo(currentChapter, currentPartNumber).label;
+    currentQuizAttemptId = String(pausedTestState.quizAttemptId || pausedTestState.clientAttemptId || '');
     currentQuizSeed      = String(pausedTestState.quizSeed || '');
+    if (!currentQuizAttemptId) {
+        alert('This paused test must be restarted because it was not issued by the backend.');
+        pausedTestState = null;
+        goHome();
+        return;
+    }
     qList                = getPausedQuestionList(pausedTestState);
     currentQuestionIds   = Array.isArray(pausedTestState.questionIds) && pausedTestState.questionIds.length > 0
         ? pausedTestState.questionIds.map((id) => String(id || '')).filter(Boolean)
@@ -4373,6 +4671,9 @@ async function persistAttemptToCloud(attempt) {
                 adminAttempts = Array.isArray(response.adminDashboard.attempts)
                     ? response.adminDashboard.attempts.map((entry) => normalizeAttemptData(entry))
                     : [];
+                adminWithdrawalRequests = Array.isArray(response.adminDashboard.withdrawalRequests)
+                    ? response.adminDashboard.withdrawalRequests.map((entry) => normalizeWithdrawalRequest(entry))
+                    : adminWithdrawalRequests;
                 adminLoadError = '';
                 renderAdminDashboard();
             }
@@ -4429,6 +4730,9 @@ async function submitTestWithBackendGrading(options = {}) {
         const total = qList.length || 0;
         const attemptedCount = answers.filter((answer) => Number.isInteger(answer)).length;
         const timedOutCount = timedOutQuestions.filter(Boolean).length;
+        if (!currentQuizAttemptId) {
+            throw new Error('Backend-issued quiz attempt is missing. Please restart the quiz.');
+        }
         const finalizedCheatLog = cloneCheatLog(cheatLog, {
             accuracy: 0,
             score: 0,
@@ -4437,7 +4741,7 @@ async function submitTestWithBackendGrading(options = {}) {
         });
 
         const attempt = {
-            clientAttemptId: createClientAttemptId(),
+            clientAttemptId: currentQuizAttemptId,
             chapter: currentChapter,
             partNumber: currentPartNumber,
             partLabel: currentPartLabel,
@@ -4525,6 +4829,7 @@ async function submitTestWithBackendGrading(options = {}) {
         resumeAnswerLockIndex = -1;
         currentQuestionStartedAt = 0;
         questionResumeCarryMs = 0;
+        currentQuizAttemptId = '';
 
         const displayedCashEarned = getCashEarnedDisplayValue(totalPoints);
         document.getElementById('score-display').innerHTML = `
@@ -4664,7 +4969,7 @@ async function submitTest(options = {}) {
         timeSpent
     });
     const attempt = {
-        clientAttemptId: createClientAttemptId(),
+        clientAttemptId: currentQuizAttemptId,
         chapter: currentChapter,
         partNumber: currentPartNumber,
         partLabel: currentPartLabel,
@@ -4717,7 +5022,7 @@ async function submitTest(options = {}) {
         <div style="font-size:1.1rem;color:var(--text-secondary);">
             Accuracy: ${accuracy}% &nbsp;|&nbsp; Time: ${Math.floor(timeSpent/60)}m ${timeSpent%60}s
         </div>
-        <h3 style="color:var(--success);margin-top:1rem;">💰 Cash Earned This Test: ${sessionPoints}</h3>
+        <h3 style="color:var(--success);margin-top:1rem;">Cash Earned This Test: ${sessionPoints}</h3>
         <div style="font-size:1rem;color:var(--text-secondary);margin-top:0.5rem;">
             Current Cash Earned: ${displayedCashEarned}
         </div>
@@ -4745,7 +5050,7 @@ async function submitTest(options = {}) {
             <div style="font-weight:700;margin-bottom:0.4rem;">Final Test Summary</div>
             <div style="color:var(--text-secondary);line-height:1.7;">
                 Correct: ${score} &nbsp;|&nbsp; Incorrect: ${incorrectCount} &nbsp;|&nbsp; Timed Out: ${timedOutCount} &nbsp;|&nbsp; Not Attempted: ${unattemptedCount}<br>
-                💰 Cash Earned This Test: ${sessionPoints} &nbsp;|&nbsp; Current Cash Earned: ${displayedCashEarned}
+                Cash Earned This Test: ${sessionPoints} &nbsp;|&nbsp; Current Cash Earned: ${displayedCashEarned}
             </div>
         </div>
     `;
@@ -4763,7 +5068,7 @@ async function submitTest(options = {}) {
                 <p><strong>Status:</strong> <span style="color:${statusColor};">${escapeHtml(item.statusLabel || 'Not Attempted')}</span></p>
                 <p>Your answer: <strong>${escapeHtml(item.userAnswer || 'Not attempted')}</strong></p>
                 <p>Correct answer: <strong style="color:var(--success)">${escapeHtml(item.correctAnswer || '')}</strong></p>
-                <p><strong>💰 Cash Earned:</strong> <span style="color:${item.pointsColor || 'var(--text-secondary)'};">${escapeHtml(item.pointsLabel || 'No cash earned.')}</span></p>
+                <p><strong>Cash Earned:</strong> <span style="color:${item.pointsColor || 'var(--text-secondary)'};">${escapeHtml(item.pointsLabel || 'No cash earned.')}</span></p>
                 <p><strong>Running Cash Earned:</strong> ${Number(item.runningReviewPoints || 0)}</p>
                 <div class="solution"><strong>Solution:</strong><br>${escapeHtml(item.solution || '')}</div>
                 ${item.marked ? '<p style="color:var(--warning);margin-top:0.5rem;"><i class="fas fa-bookmark"></i> Marked for review</p>' : ''}
