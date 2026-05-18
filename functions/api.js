@@ -14,12 +14,23 @@ const INCORRECT_POINTS_PENALTY = 50;
 const CHAPTER_PART_SIZE = Number(process.env.CHAPTER_PART_SIZE || 20);
 const CHAPTER_QUESTION_LIMIT = Number(process.env.CHAPTER_QUESTION_LIMIT || 100);
 const NUMERICAL_VARIANTS_PER_ATTEMPT = Number(process.env.NUMERICAL_VARIANTS_PER_ATTEMPT || 2);
+const DAILY_REWARD_CAP = Math.max(0, Number(process.env.DAILY_REWARD_CAP || 1000));
+const MAX_QUIZ_STARTS_PER_HOUR = Math.max(1, Number(process.env.MAX_QUIZ_STARTS_PER_HOUR || 12));
+const QUIZ_ATTEMPT_TTL_MS = Math.max(
+  15 * 60 * 1000,
+  Number(process.env.QUIZ_ATTEMPT_TTL_MS || 3 * 60 * 60 * 1000)
+);
+const REQUIRE_APP_CHECK = process.env.REQUIRE_APP_CHECK === 'true';
 const DEFAULT_CORS_ORIGINS = [
   'https://learnloot.netlify.app',
   'https://learn-loot.netlify.app',
   'https://earnlearn-68952.web.app',
   'https://earnlearn-68952.firebaseapp.com'
 ];
+const MIN_WITHDRAWAL_POINTS = Number(process.env.MIN_WITHDRAWAL_POINTS || 10000);
+const MAX_WITHDRAWAL_REQUESTS = Number(process.env.MAX_WITHDRAWAL_REQUESTS || 150);
+const WITHDRAWAL_STATUSES = new Set(['Pending', 'Approved', 'Rejected', 'Paid']);
+const WITHDRAWAL_SUBMIT_COOLDOWN_MS = Number(process.env.WITHDRAWAL_SUBMIT_COOLDOWN_MS || 30 * 1000);
 const adminEmails = new Set(
   String(process.env.ADMIN_EMAILS || 'sanskarpatil838@gmail.com')
     .split(',')
@@ -57,6 +68,8 @@ if (!admin.apps.length) {
 const db = admin.firestore();
 const serverTimestamp = admin.firestore.FieldValue.serverTimestamp;
 
+app.use('/api', requireAppCheck);
+
 function isAdminEmail(email) {
   return adminEmails.has(String(email || '').trim().toLowerCase());
 }
@@ -89,6 +102,21 @@ function sanitizeClientAttemptId(value) {
     .replace(/[^a-zA-Z0-9_-]/g, '-')
     .replace(/-+/g, '-')
     .replace(/^-|-$/g, '');
+}
+
+function getHourBucket(nowMs = Date.now()) {
+  const date = new Date(nowMs);
+  return date.toISOString().slice(0, 13).replace(/[-:T]/g, '');
+}
+
+function getHourStartMs(nowMs = Date.now()) {
+  const date = new Date(nowMs);
+  date.setUTCMinutes(0, 0, 0);
+  return date.getTime();
+}
+
+function getDailyRewardBucket(nowMs = Date.now()) {
+  return new Date(nowMs).toISOString().slice(0, 10);
 }
 
 function sanitizeQuestionTimes(questionTimes) {
@@ -182,7 +210,7 @@ function getQuestionBankApi() {
 }
 
 function questionForClient(question, index) {
-  return {
+  const clientQuestion = {
     questionId: clampText(question && question.questionId, 120),
     questionNumber: index + 1,
     q: clampText(question && question.q, 2000),
@@ -190,6 +218,8 @@ function questionForClient(question, index) {
       ? question.o.slice(0, 4).map((option) => clampText(option, 1000))
       : []
   };
+
+  return clientQuestion;
 }
 
 function createQuizSeed() {
@@ -202,6 +232,37 @@ function sanitizeQuestionIds(questionIds, limit = CHAPTER_PART_SIZE) {
     .slice(0, limit)
     .map((id) => clampText(id, 120))
     .filter(Boolean);
+}
+
+function sanitizeWithdrawalStatus(status) {
+  const next = clampText(status, 24, 'Pending');
+  return WITHDRAWAL_STATUSES.has(next) ? next : 'Pending';
+}
+
+function normalizeWithdrawalRequestDoc(doc) {
+  const data = typeof doc.data === 'function' ? doc.data() || {} : doc || {};
+  return {
+    id: doc.id || data.id || '',
+    userId: clampText(data.userId, 120),
+    userName: clampText(data.userName, 80, 'Student'),
+    email: clampText(data.email, 160),
+    phone: clampText(data.phone, 30),
+    upiId: clampText(data.upiId, 120),
+    walletBalance: toInteger(data.walletBalance),
+    requestedPoints: toInteger(data.requestedPoints),
+    status: sanitizeWithdrawalStatus(data.status),
+    requestDateTime: toInteger(data.requestDateTime || data.requestedAtMs),
+    requestedAtMs: toInteger(data.requestedAtMs || data.requestDateTime),
+    updatedAtMs: toInteger(data.updatedAtMs),
+    updatedBy: clampText(data.updatedBy, 160)
+  };
+}
+
+function questionIdsMatch(left, right) {
+  const leftIds = sanitizeQuestionIds(left);
+  const rightIds = sanitizeQuestionIds(right);
+  if (leftIds.length !== rightIds.length) return false;
+  return leftIds.every((id, index) => id === rightIds[index]);
 }
 
 function getChapterCatalog() {
@@ -220,14 +281,15 @@ function getChapterCatalog() {
 
 function getQuizQuestionPayload(chapter, partNumber = 1) {
   const bank = getQuestionBankApi();
-  if (!bank.getChapterNames().includes(chapter)) {
+  const chapterNames = bank.getChapterNames();
+  if (!chapterNames.includes(chapter)) {
     throw createHttpError(400, 'Unknown quiz chapter.');
   }
 
   const partInfo = bank.getChapterPartInfo(chapter, partNumber);
   const quizSeed = createQuizSeed();
   const serverQuestions = bank.getQuizQuestionsForAttempt(chapter, partInfo.partNumber, quizSeed);
-  const questions = serverQuestions.map(questionForClient);
+  const questions = serverQuestions.map((question, index) => questionForClient(question, index));
   const questionIds = questions.map((question) => question.questionId).filter(Boolean);
 
   return {
@@ -242,37 +304,31 @@ function getQuizQuestionPayload(chapter, partNumber = 1) {
   };
 }
 
-function gradeAttemptPayload(raw = {}, startingBalance = 0) {
+function getQuestionsForIssuedAttempt(issuedAttempt = {}) {
   const bank = getQuestionBankApi();
-  const chapter = clampText(raw.chapter, 120);
-  const partNumber = Math.max(1, toInteger(raw.partNumber, 1));
-  const quizSeed = clampText(raw.quizSeed, 160);
-  const rawQuestionIds = sanitizeQuestionIds(raw.questionIds);
+  const chapter = clampText(issuedAttempt.chapter, 120);
+  const questionIds = sanitizeQuestionIds(issuedAttempt.questionIds);
 
   if (!bank.getChapterNames().includes(chapter)) {
-    throw createHttpError(400, 'Unknown quiz chapter or part.');
+    throw createHttpError(400, 'Unknown quiz attempt chapter.');
   }
 
-  let questions = rawQuestionIds.length
-    ? bank.getQuizQuestionsByIds(chapter, rawQuestionIds)
-    : [];
+  const questions = bank.getQuizQuestionsByIds(chapter, questionIds);
 
-  if (rawQuestionIds.length && questions.length !== rawQuestionIds.length) {
-    throw createHttpError(400, 'Question list did not match the selected quiz.');
+  if (!questionIds.length || questions.length !== questionIds.length) {
+    throw createHttpError(400, 'Issued quiz attempt could not be verified.');
   }
 
-  if (!questions.length && quizSeed) {
-    questions = bank.getQuizQuestionsForAttempt(chapter, partNumber, quizSeed);
+  return questions;
+}
+
+function gradeAttemptPayload(raw = {}, startingBalance = 0, issuedAttempt = null) {
+  if (!issuedAttempt) {
+    throw createHttpError(400, 'Start the quiz again before submitting. No issued attempt was found.');
   }
 
-  if (!questions.length) {
-    questions = bank.getQuizQuestionsForAttempt(chapter, partNumber);
-  }
-
-  if (!questions.length) {
-    throw createHttpError(400, 'Unknown quiz chapter or part.');
-  }
-
+  const bank = getQuestionBankApi();
+  const questions = getQuestionsForIssuedAttempt(issuedAttempt);
   const answers = sanitizeAnswerIndexes(raw.answers, questions.length);
   const timedOutQuestions = sanitizeBooleanList(raw.timedOutQuestions, questions.length);
   const markedQuestions = sanitizeBooleanList(raw.markedQuestions || raw.marked, questions.length);
@@ -281,7 +337,7 @@ function gradeAttemptPayload(raw = {}, startingBalance = 0) {
 
   return {
     ...grade,
-    quizSeed,
+    quizSeed: clampText(issuedAttempt.quizSeed, 160),
     questionIds,
     answers,
     timedOutQuestions,
@@ -289,9 +345,14 @@ function gradeAttemptPayload(raw = {}, startingBalance = 0) {
   };
 }
 
-function sanitizeAttempt(raw = {}, user, startingBalance = 0) {
-  const clientAttemptId = sanitizeClientAttemptId(raw.clientAttemptId);
-  const grade = gradeAttemptPayload(raw, startingBalance);
+function sanitizeAttempt(raw = {}, user, startingBalance = 0, issuedAttempt = null) {
+  const backendAttemptId = sanitizeClientAttemptId(issuedAttempt && issuedAttempt.attemptId);
+  const clientAttemptId = sanitizeClientAttemptId(raw.clientAttemptId) || backendAttemptId;
+  if (!issuedAttempt || !backendAttemptId) {
+    throw createHttpError(400, 'Submitted attempt does not match the issued quiz attempt.');
+  }
+
+  const grade = gradeAttemptPayload(raw, startingBalance, issuedAttempt);
   const total = Math.max(0, toInteger(grade.total));
   const score = Math.min(total, Math.max(0, toInteger(grade.score)));
   const attemptedCount = Math.min(total, Math.max(0, toInteger(grade.attemptedCount, total)));
@@ -308,11 +369,12 @@ function sanitizeAttempt(raw = {}, user, startingBalance = 0) {
   });
 
   const attempt = {
+    attemptId: backendAttemptId,
     clientAttemptId,
-    chapter: clampText(raw.chapter, 120, 'Untitled Chapter'),
-    partNumber: Math.max(1, toInteger(raw.partNumber, 1)),
-    partLabel: clampText(raw.partLabel, 80),
-    quizSeed: clampText(raw.quizSeed, 160),
+    chapter: clampText(issuedAttempt.chapter, 120, 'Untitled Chapter'),
+    partNumber: Math.max(1, toInteger(issuedAttempt.partNumber, 1)),
+    partLabel: clampText(issuedAttempt.partLabel, 80),
+    quizSeed: clampText(issuedAttempt.quizSeed, 160),
     questionIds: Array.isArray(grade.questionIds) ? grade.questionIds : [],
     difficulty: clampText(raw.difficulty, 32, 'all'),
     score,
@@ -403,12 +465,123 @@ async function requireAuth(req, res, next) {
   }
 }
 
+async function requireAppCheck(req, res, next) {
+  if (!REQUIRE_APP_CHECK) {
+    next();
+    return;
+  }
+
+  try {
+    const token = req.get('x-firebase-appcheck') || '';
+    if (!token) {
+      res.status(401).json({ error: 'Missing Firebase App Check token.' });
+      return;
+    }
+
+    req.appCheck = await admin.appCheck().verifyToken(token);
+    next();
+  } catch (error) {
+    res.status(401).json({ error: 'Invalid Firebase App Check token.' });
+  }
+}
+
 function requireAdmin(req, res, next) {
   if (!isAdminEmail(req.auth && req.auth.email)) {
     res.status(403).json({ error: 'Admin access required.' });
     return;
   }
   next();
+}
+
+async function issueQuizAttempt(decoded, rawChapter, rawPartNumber = 1) {
+  const payload = getQuizQuestionPayload(rawChapter, rawPartNumber);
+  const nowMs = Date.now();
+  const attemptId = crypto.randomUUID();
+  const expiresAtMs = nowMs + QUIZ_ATTEMPT_TTL_MS;
+  const userRef = db.collection('users').doc(decoded.uid);
+  const attemptRef = userRef.collection('quizSessions').doc(attemptId);
+  const hourBucket = getHourBucket(nowMs);
+  const rateRef = userRef.collection('rateLimits').doc(`quiz-start-${hourBucket}`);
+
+  await db.runTransaction(async (transaction) => {
+    const rateSnapshot = await transaction.get(rateRef);
+    const rateData = rateSnapshot.exists ? rateSnapshot.data() || {} : {};
+    const startCount = toInteger(rateData.count);
+
+    if (startCount >= MAX_QUIZ_STARTS_PER_HOUR) {
+      throw createHttpError(429, 'Too many quizzes started. Please wait before starting another one.');
+    }
+
+    transaction.set(rateRef, {
+      bucket: hourBucket,
+      windowStartMs: getHourStartMs(nowMs),
+      count: startCount + 1,
+      updatedAt: serverTimestamp()
+    }, { merge: true });
+
+    transaction.set(attemptRef, {
+      attemptId,
+      uid: decoded.uid,
+      status: 'issued',
+      chapter: payload.chapter,
+      partNumber: payload.partInfo.partNumber,
+      partLabel: payload.partInfo.label,
+      quizSeed: payload.quizSeed,
+      questionIds: payload.questionIds,
+      questionCount: payload.questionIds.length,
+      maxPositivePoints: payload.questionIds.length * POINTS_PER_QUESTION,
+      issuedAtMs: nowMs,
+      expiresAtMs,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    });
+  });
+
+  return {
+    ...payload,
+    attemptId,
+    expiresAtMs
+  };
+}
+
+async function findIssuedQuizSession(transaction, userRef, rawAttempt, clientAttemptId, nowMs) {
+  if (clientAttemptId) {
+    const directRef = userRef.collection('quizSessions').doc(clientAttemptId);
+    const directSnapshot = await transaction.get(directRef);
+    if (directSnapshot.exists) {
+      return { ref: directRef, snapshot: directSnapshot };
+    }
+  }
+
+  const quizSeed = clampText(rawAttempt.quizSeed, 160);
+  if (!quizSeed) {
+    throw createHttpError(400, 'A backend-issued quiz attempt is required.');
+  }
+
+  const fallbackSnapshot = await transaction.get(
+    userRef.collection('quizSessions')
+      .where('quizSeed', '==', quizSeed)
+      .limit(5)
+  );
+  const submittedChapter = clampText(rawAttempt.chapter, 120);
+  const submittedPartNumber = Math.max(1, toInteger(rawAttempt.partNumber, 1));
+  const submittedQuestionIds = sanitizeQuestionIds(rawAttempt.questionIds);
+
+  for (const doc of fallbackSnapshot.docs) {
+    const data = doc.data() || {};
+    if (
+      data.status === 'issued'
+      && data.uid === userRef.id
+      && toNonNegativeNumber(data.expiresAtMs) >= nowMs
+      && clampText(data.chapter, 120) === submittedChapter
+      && Math.max(1, toInteger(data.partNumber, 1)) === submittedPartNumber
+      && questionIdsMatch(data.questionIds, submittedQuestionIds)
+    ) {
+      return { ref: doc.ref, snapshot: doc };
+    }
+  }
+
+  throw createHttpError(400, 'Start the quiz again before submitting. This attempt was not issued by the backend.');
 }
 
 async function ensureUserProfile(decoded, seed = {}) {
@@ -486,6 +659,15 @@ async function getAdminAttemptsFromUsers(usersSnapshot, userMetaById) {
     .slice(0, MAX_ADMIN_ATTEMPTS);
 }
 
+async function getAdminWithdrawalRequests() {
+  const snapshot = await db.collection('withdrawalRequests')
+    .orderBy('requestedAtMs', 'desc')
+    .limit(MAX_WITHDRAWAL_REQUESTS)
+    .get();
+
+  return snapshot.docs.map((doc) => normalizeWithdrawalRequestDoc(doc));
+}
+
 async function getAdminDashboardData() {
   const usersSnapshot = await db.collection('users')
     .orderBy('totalPoints', 'desc')
@@ -515,7 +697,9 @@ async function getAdminDashboardData() {
     attempts = await getAdminAttemptsFromUsers(usersSnapshot, userMetaById);
   }
 
-  return { users, attempts };
+  const withdrawalRequests = await getAdminWithdrawalRequests();
+
+  return { users, attempts, withdrawalRequests };
 }
 
 app.get('/health', (req, res) => {
@@ -560,6 +744,8 @@ app.get('/api/quiz/chapters', requireAuth, async (req, res, next) => {
       settings: {
         pointsPerQuestion: POINTS_PER_QUESTION,
         incorrectPointsPenalty: INCORRECT_POINTS_PENALTY,
+        dailyRewardCap: DAILY_REWARD_CAP,
+        maxQuizStartsPerHour: MAX_QUIZ_STARTS_PER_HOUR,
         chapterPartSize: CHAPTER_PART_SIZE,
         quizTotalSeconds: 40 * 60
       }
@@ -573,7 +759,86 @@ app.get('/api/quiz/questions', requireAuth, async (req, res, next) => {
   try {
     const chapter = clampText(req.query.chapter, 120);
     const partNumber = Math.max(1, toInteger(req.query.partNumber, 1));
-    res.json(getQuizQuestionPayload(chapter, partNumber));
+    res.json(await issueQuizAttempt(req.auth, chapter, partNumber));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/withdrawals', requireAuth, async (req, res, next) => {
+  try {
+    const raw = req.body || {};
+    const phone = clampText(raw.phone, 30);
+    const upiId = clampText(raw.upiId, 120);
+    const requestedPoints = toInteger(raw.requestedPoints);
+    const nowMs = Date.now();
+
+    if (!phone) {
+      throw createHttpError(400, 'Phone number is required.');
+    }
+
+    if (!upiId) {
+      throw createHttpError(400, 'UPI ID is required.');
+    }
+
+    if (requestedPoints < MIN_WITHDRAWAL_POINTS) {
+      throw createHttpError(400, `Minimum ${MIN_WITHDRAWAL_POINTS.toLocaleString('en-US')} points required to request withdrawal.`);
+    }
+
+    const userRef = db.collection('users').doc(req.auth.uid);
+    const requestRef = db.collection('withdrawalRequests').doc();
+    const rateRef = userRef.collection('rateLimits').doc('withdrawal-submit');
+    let savedRequest = null;
+
+    await db.runTransaction(async (transaction) => {
+      const [userSnapshot, rateSnapshot] = await Promise.all([
+        transaction.get(userRef),
+        transaction.get(rateRef)
+      ]);
+      const profile = userSnapshot.exists ? userSnapshot.data() || {} : {};
+      const walletBalance = toInteger(profile.totalPoints);
+      const rateData = rateSnapshot.exists ? rateSnapshot.data() || {} : {};
+      const lastRequestAtMs = toInteger(rateData.lastRequestAtMs);
+
+      if (lastRequestAtMs && nowMs - lastRequestAtMs < WITHDRAWAL_SUBMIT_COOLDOWN_MS) {
+        throw createHttpError(429, 'Please wait a moment before submitting another withdrawal request.');
+      }
+
+      if (walletBalance < MIN_WITHDRAWAL_POINTS) {
+        throw createHttpError(400, `Minimum ${MIN_WITHDRAWAL_POINTS.toLocaleString('en-US')} points required to request withdrawal.`);
+      }
+
+      if (requestedPoints > walletBalance) {
+        throw createHttpError(400, 'Withdrawal points cannot be greater than your current wallet balance.');
+      }
+
+      savedRequest = {
+        id: requestRef.id,
+        userId: req.auth.uid,
+        userName: clampText(profile.name || req.auth.name || (req.auth.email || '').split('@')[0] || 'Student', 80),
+        email: clampText(profile.email || req.auth.email, 160),
+        phone,
+        upiId,
+        walletBalance,
+        requestedPoints,
+        status: 'Pending',
+        requestDateTime: nowMs,
+        requestedAtMs: nowMs,
+        requestedAt: serverTimestamp(),
+        updatedAtMs: nowMs,
+        updatedAt: serverTimestamp()
+      };
+
+      transaction.set(requestRef, savedRequest);
+      transaction.set(rateRef, {
+        lastRequestAtMs: nowMs,
+        updatedAt: serverTimestamp()
+      }, { merge: true });
+    });
+
+    res.status(201).json({
+      withdrawalRequest: normalizeWithdrawalRequestDoc(savedRequest)
+    });
   } catch (error) {
     next(error);
   }
@@ -584,32 +849,64 @@ app.post('/api/attempts', requireAuth, async (req, res, next) => {
     const userRef = db.collection('users').doc(req.auth.uid);
     const rawAttempt = req.body || {};
     const clientAttemptId = sanitizeClientAttemptId(rawAttempt.clientAttemptId);
-    const fallbackAttemptRef = clientAttemptId ? null : userRef.collection('attempts').doc();
+    const nowMs = Date.now();
+    const dailyRewardBucket = getDailyRewardBucket(nowMs);
+    const dailyRewardRef = userRef.collection('rewardLimits').doc(dailyRewardBucket);
     let persistedAttempt = null;
     let persistedReview = [];
 
     const totals = await db.runTransaction(async (transaction) => {
       const latestUserSnapshot = await transaction.get(userRef);
+      const issuedSession = await findIssuedQuizSession(transaction, userRef, rawAttempt, clientAttemptId, nowMs);
+      const issuedAttempt = issuedSession.snapshot.data() || {};
+      const backendAttemptId = sanitizeClientAttemptId(issuedAttempt.attemptId);
+      if (!backendAttemptId) {
+        throw createHttpError(400, 'Submitted attempt does not match the issued quiz attempt.');
+      }
+      const attemptRef = userRef.collection('attempts').doc(backendAttemptId);
+      const existingAttemptSnapshot = await transaction.get(attemptRef);
+      const dailyRewardSnapshot = await transaction.get(dailyRewardRef);
       const latest = latestUserSnapshot.exists ? latestUserSnapshot.data() : {};
       const previousTotalPoints = toInteger(latest.totalPoints);
       const currentProfile = publicProfileFromDoc(req.auth.uid, latest, req.auth);
-      const attemptRef = clientAttemptId
-        ? userRef.collection('attempts').doc(clientAttemptId)
-        : fallbackAttemptRef;
-      const existingAttemptSnapshot = await transaction.get(attemptRef);
+
       if (existingAttemptSnapshot.exists) {
         persistedAttempt = normalizeAttemptForResponse(existingAttemptSnapshot.data(), currentProfile);
+        persistedReview = Array.isArray(persistedAttempt.review) ? persistedAttempt.review : [];
         return latest;
       }
 
-      const { attempt, review } = sanitizeAttempt(rawAttempt, currentProfile, previousTotalPoints);
+      if (issuedAttempt.uid !== req.auth.uid || issuedAttempt.status !== 'issued') {
+        throw createHttpError(409, 'This quiz attempt has already been used or is no longer valid.');
+      }
+
+      if (toNonNegativeNumber(issuedAttempt.expiresAtMs) < nowMs) {
+        throw createHttpError(409, 'This quiz attempt expired. Please start the quiz again.');
+      }
+
+      const { attempt, review } = sanitizeAttempt(rawAttempt, currentProfile, previousTotalPoints, issuedAttempt);
       const resetPoints = Boolean(attempt.cheatLog && attempt.cheatLog.autoSubmitted);
+      const rawAttemptPoints = resetPoints ? 0 : toInteger(attempt.points);
+      const dailyRewardData = dailyRewardSnapshot.exists ? dailyRewardSnapshot.data() || {} : {};
+      const previousDailyEarned = toNonNegativeNumber(dailyRewardData.earned);
+      const dailyRewardRemaining = Math.max(0, DAILY_REWARD_CAP - previousDailyEarned);
+      const cappedAttemptPoints = rawAttemptPoints > 0
+        ? Math.min(rawAttemptPoints, dailyRewardRemaining)
+        : rawAttemptPoints;
       const nextTotalPoints = resetPoints
         ? 0
-        : Math.max(0, previousTotalPoints + toInteger(attempt.points));
+        : Math.max(0, previousTotalPoints + cappedAttemptPoints);
       const attemptToSave = {
         ...attempt,
-        points: resetPoints ? 0 : nextTotalPoints - previousTotalPoints
+        points: resetPoints ? 0 : nextTotalPoints - previousTotalPoints,
+        originalPoints: rawAttemptPoints,
+        rewardCapped: rawAttemptPoints > cappedAttemptPoints,
+        rewardCap: DAILY_REWARD_CAP,
+        dailyRewardBucket,
+        dailyRewardRemainingBefore: dailyRewardRemaining,
+        startingBalance: previousTotalPoints,
+        submittedAtMs: nowMs,
+        review
       };
 
       const nextTotals = {
@@ -628,6 +925,21 @@ app.post('/api/attempts', requireAuth, async (req, res, next) => {
       persistedAttempt = attemptToSave;
       persistedReview = review;
       transaction.set(attemptRef, attemptToSave);
+      transaction.set(issuedSession.ref, {
+        status: 'completed',
+        consumedAtMs: nowMs,
+        consumedAt: serverTimestamp(),
+        attemptPath: attemptRef.path,
+        updatedAt: serverTimestamp()
+      }, { merge: true });
+      if (cappedAttemptPoints > 0) {
+        transaction.set(dailyRewardRef, {
+          bucket: dailyRewardBucket,
+          cap: DAILY_REWARD_CAP,
+          earned: previousDailyEarned + cappedAttemptPoints,
+          updatedAt: serverTimestamp()
+        }, { merge: true });
+      }
       transaction.set(userRef, nextTotals, { merge: true });
       return nextTotals;
     });
@@ -654,6 +966,48 @@ app.post('/api/attempts', requireAuth, async (req, res, next) => {
 app.get('/api/admin/dashboard', requireAuth, requireAdmin, async (req, res, next) => {
   try {
     res.json(await getAdminDashboardData());
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/admin/withdrawals', requireAuth, requireAdmin, async (req, res, next) => {
+  try {
+    res.json({ withdrawalRequests: await getAdminWithdrawalRequests() });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.patch('/api/admin/withdrawals/:requestId/status', requireAuth, requireAdmin, async (req, res, next) => {
+  try {
+    const requestId = sanitizeClientAttemptId(req.params.requestId);
+    const status = clampText(req.body && req.body.status, 24);
+
+    if (!requestId) {
+      throw createHttpError(400, 'Withdrawal request id is required.');
+    }
+
+    if (!WITHDRAWAL_STATUSES.has(status)) {
+      throw createHttpError(400, 'Invalid withdrawal status.');
+    }
+
+    const requestRef = db.collection('withdrawalRequests').doc(requestId);
+    const snapshot = await requestRef.get();
+    if (!snapshot.exists) {
+      throw createHttpError(404, 'Withdrawal request not found.');
+    }
+
+    const nowMs = Date.now();
+    await requestRef.set({
+      status,
+      updatedAtMs: nowMs,
+      updatedAt: serverTimestamp(),
+      updatedBy: req.auth.email || req.auth.uid
+    }, { merge: true });
+
+    const updatedSnapshot = await requestRef.get();
+    res.json({ withdrawalRequest: normalizeWithdrawalRequestDoc(updatedSnapshot) });
   } catch (error) {
     next(error);
   }
