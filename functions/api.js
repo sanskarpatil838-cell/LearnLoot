@@ -24,6 +24,8 @@ const QUIZ_ATTEMPT_TTL_MS = Math.max(
 );
 const REQUIRE_APP_CHECK = process.env.REQUIRE_APP_CHECK === 'true';
 const DEFAULT_CORS_ORIGINS = [
+  'https://learnloot.in',
+  'https://www.learnloot.in',
   'https://learnloot.netlify.app',
   'https://learn-loot.netlify.app',
   'https://earnlearn-68952.web.app',
