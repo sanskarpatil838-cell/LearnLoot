@@ -1,6 +1,7 @@
 node_modules/
 **/node_modules/
 .npm-cache/
+.tools/
 .netlify/
 .firebase/
 netlify-public/
