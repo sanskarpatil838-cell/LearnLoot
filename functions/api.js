@@ -102,6 +102,20 @@ function toInteger(value, fallback = 0) {
   return Math.round(toFiniteNumber(value, fallback));
 }
 
+function readIntegerField(value) {
+  if (value === undefined || value === null || value === '') return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.round(number) : null;
+}
+
+function getUserPointBalance(data = {}) {
+  const points = readIntegerField(data.points);
+  if (points !== null) return points;
+
+  const totalPoints = readIntegerField(data.totalPoints);
+  return totalPoints !== null ? totalPoints : 0;
+}
+
 function sanitizeClientAttemptId(value) {
   return clampText(value, 120)
     .replace(/[^a-zA-Z0-9_-]/g, '-')
@@ -539,7 +553,7 @@ function sanitizeAttempt(raw = {}, user, startingBalance = 0, issuedAttempt = nu
 
 function publicProfileFromDoc(uid, data = {}, decoded = null) {
   const email = decoded ? decoded.email || '' : data.email || '';
-  const totalPoints = toInteger(data.totalPoints ?? data.points);
+  const totalPoints = getUserPointBalance(data);
   const totalReferrals = toInteger(data.totalReferrals ?? data.numberOfReferrals ?? data.noOfReferrals);
   return {
     uid,
@@ -564,12 +578,14 @@ function publicProfileFromDoc(uid, data = {}, decoded = null) {
 
 function publicLeaderboardEntry(doc) {
   const data = doc.data() || {};
+  const totalPoints = getUserPointBalance(data);
   return {
     id: doc.id,
     uid: doc.id,
     name: data.name || 'Student',
     avatar: data.avatar || 'ST',
-    totalPoints: toInteger(data.totalPoints),
+    totalPoints,
+    points: totalPoints,
     testsCompleted: toInteger(data.testsCompleted),
     totalTimeSpent: toNonNegativeNumber(data.totalTimeSpent),
     totalCorrectAnswers: toInteger(data.totalCorrectAnswers),
@@ -842,7 +858,7 @@ async function ensureUserProfile(decoded, seed = {}, req = null) {
       };
     }
 
-    const totalPoints = toInteger(existing.totalPoints ?? existing.points);
+    const totalPoints = getUserPointBalance(existing);
     const totalReferrals = toInteger(existing.totalReferrals ?? existing.numberOfReferrals ?? existing.noOfReferrals);
     const profile = {
       uid: decoded.uid,
@@ -881,13 +897,35 @@ async function ensureUserProfile(decoded, seed = {}, req = null) {
   return publicProfile;
 }
 
-async function getLeaderboard() {
-  const snapshot = await db.collection('users')
-    .orderBy('totalPoints', 'desc')
-    .limit(MAX_LEADERBOARD_USERS)
-    .get();
+async function getRankedUserDocs(limit = MAX_LEADERBOARD_USERS) {
+  const safeLimit = Math.max(1, Number(limit || MAX_LEADERBOARD_USERS));
+  const queryLimit = Math.max(safeLimit, MAX_LEADERBOARD_USERS);
+  const [byTotalPoints, byPoints] = await Promise.all([
+    db.collection('users')
+      .orderBy('totalPoints', 'desc')
+      .limit(queryLimit)
+      .get(),
+    db.collection('users')
+      .orderBy('points', 'desc')
+      .limit(queryLimit)
+      .get()
+  ]);
 
-  return snapshot.docs.map((doc) => ({
+  const docsById = new Map();
+  [byTotalPoints, byPoints].forEach((snapshot) => {
+    snapshot.docs.forEach((doc) => {
+      docsById.set(doc.id, doc);
+    });
+  });
+
+  return Array.from(docsById.values())
+    .sort((a, b) => getUserPointBalance(b.data()) - getUserPointBalance(a.data()))
+    .slice(0, safeLimit);
+}
+
+async function getLeaderboard() {
+  const userDocs = await getRankedUserDocs(MAX_LEADERBOARD_USERS);
+  return userDocs.map((doc) => ({
     ...publicLeaderboardEntry(doc)
   }));
 }
@@ -953,9 +991,9 @@ function normalizeAdminAttemptDoc(doc, userMetaById) {
   }, userMetaById.get(userId) || { uid: userId });
 }
 
-async function getAdminAttemptsFromUsers(usersSnapshot, userMetaById) {
+async function getAdminAttemptsFromUserDocs(userDocs, userMetaById) {
   const attemptSnapshots = await Promise.all(
-    usersSnapshot.docs.map((userDoc) => userDoc.ref
+    userDocs.map((userDoc) => userDoc.ref
       .collection('attempts')
       .orderBy('timestamp', 'desc')
       .limit(MAX_ADMIN_ATTEMPTS)
@@ -987,15 +1025,18 @@ async function getAdminReferralRecords(userMetaById = new Map()) {
 }
 
 async function getAdminDashboardData() {
-  const usersSnapshot = await db.collection('users')
-    .orderBy('totalPoints', 'desc')
-    .limit(MAX_ADMIN_USERS)
-    .get();
+  const userDocs = await getRankedUserDocs(MAX_ADMIN_USERS);
 
-  const users = usersSnapshot.docs.map((doc) => ({
-    id: doc.id,
-    ...doc.data()
-  }));
+  const users = userDocs.map((doc) => {
+    const data = doc.data() || {};
+    const totalPoints = getUserPointBalance(data);
+    return {
+      id: doc.id,
+      ...data,
+      totalPoints,
+      points: totalPoints
+    };
+  });
 
   const userMetaById = new Map(users.map((user) => [user.id, {
     uid: user.id,
@@ -1012,7 +1053,7 @@ async function getAdminDashboardData() {
     attempts = attemptsSnapshot.docs.map((doc) => normalizeAdminAttemptDoc(doc, userMetaById));
   } catch (error) {
     console.warn('Admin collection-group attempt query failed; falling back to per-user reads.', error);
-    attempts = await getAdminAttemptsFromUsers(usersSnapshot, userMetaById);
+    attempts = await getAdminAttemptsFromUserDocs(userDocs, userMetaById);
   }
 
   const [withdrawalRequests, referrals] = await Promise.all([
