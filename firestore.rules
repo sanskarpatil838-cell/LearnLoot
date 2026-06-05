@@ -33,6 +33,11 @@ service cloud.firestore {
         allow create: if false;
         allow update, delete: if false;
       }
+
+      match /pointsHistory/{historyId} {
+        allow read: if isOwner(userId) || isAdmin();
+        allow create, update, delete: if false;
+      }
     }
 
     match /{path=**}/attempts/{attemptId} {
@@ -41,6 +46,18 @@ service cloud.firestore {
 
     match /withdrawalRequests/{requestId} {
       allow read: if isAdmin() || (signedIn() && resource.data.userId == request.auth.uid);
+      allow create, update, delete: if false;
+    }
+
+    match /referrals/{referralId} {
+      allow read: if isAdmin()
+        || (
+          signedIn()
+          && (
+            resource.data.referrerUserId == request.auth.uid
+            || resource.data.referredUserId == request.auth.uid
+          )
+        );
       allow create, update, delete: if false;
     }
 
@@ -82,4 +99,3 @@ service cloud.firestore {
     }
   }
 }
-

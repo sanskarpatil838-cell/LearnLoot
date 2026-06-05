@@ -12,22 +12,36 @@ window.adminConfig = {
   suspicionThreshold: 8,
   rapidAnswerSeconds: 3,
   maxAdminUsers: 200,
-  maxAdminAttempts: 250
+  maxAdminAttempts: 250,
+  maxLeaderboardUsers: 10
+};
+
+window.appCheckConfig = {
+  enabled: false,
+  siteKey: ""
 };
 
 const backendApiBaseUrl = (() => {
   const params = new URLSearchParams(window.location.search);
   const backendMode = params.get("backend");
   const isLocalStaticServer = ["localhost", "127.0.0.1"].includes(window.location.hostname);
-  if (backendMode === "local") return "http://127.0.0.1:3000";
-  if (backendMode === "cloud") return "https://us-central1-earnlearn-68952.cloudfunctions.net/api";
-  return isLocalStaticServer
-    ? window.location.origin
-    : "https://us-central1-earnlearn-68952.cloudfunctions.net/api";
+  const cloudBackendUrl = "https://us-central1-earnlearn-68952.cloudfunctions.net/api";
+  const localBackendUrl = `${window.location.protocol}//${window.location.hostname}:5500`;
+  if (backendMode === "local") return localBackendUrl;
+  if (isLocalStaticServer) return localBackendUrl;
+  return cloudBackendUrl;
+})();
+
+const backendMode = (() => {
+  const params = new URLSearchParams(window.location.search);
+  const explicitMode = params.get("backend");
+  if (explicitMode === "local" || explicitMode === "cloud") return explicitMode;
+  return ["localhost", "127.0.0.1"].includes(window.location.hostname) ? "local" : "cloud";
 })();
 
 window.backendConfig = {
   apiBaseUrl: backendApiBaseUrl,
+  mode: backendMode,
   requireBackend: true,
   allowClientFirestoreFallback: false
 };

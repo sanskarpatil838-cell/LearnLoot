@@ -1,7 +1,22 @@
 // ============================================================
 // ===== USER PROFILE =====
 // ============================================================
-const DISPLAY_AVATARS = ['ST', 'LN', 'FX', 'TR', 'EG', 'RK', 'SP', 'FR', 'DM', 'SR', 'TG', 'CP'];
+const DISPLAY_AVATARS = ['🎓', '📚', '🧠', '🧮', '🚀', '⭐', '🔥', '💡', '🏆', '🎯', '📝', '✨'];
+const LEGACY_AVATAR_MAP = {
+    ST: '🎓',
+    LN: '📚',
+    FX: '🧠',
+    TR: '🧮',
+    EG: '🚀',
+    RK: '⭐',
+    SP: '🔥',
+    FR: '💡',
+    DM: '🏆',
+    SR: '🎯',
+    TG: '📝',
+    CP: '✨',
+    '??': '🎓'
+};
 const firebaseConfig = window.firebaseConfig || null;
 const appCheckConfig = window.appCheckConfig || {};
 const firebaseReady = typeof firebase !== 'undefined'
@@ -45,10 +60,17 @@ const RAPID_ANSWER_SECONDS_THRESHOLD = Number(adminConfig.rapidAnswerSeconds || 
 const SUSPICION_SCORE_THRESHOLD = Number(adminConfig.suspicionThreshold || 8);
 const MAX_ADMIN_USERS = Number(adminConfig.maxAdminUsers || 200);
 const MAX_ADMIN_ATTEMPTS = Number(adminConfig.maxAdminAttempts || 250);
+const MAX_LEADERBOARD_USERS = Number(adminConfig.maxLeaderboardUsers || 100);
 const LEADERBOARD_CACHE_MS = 30 * 1000;
 const AUTO_SUBMIT_MESSAGE = 'Test submitted automatically because the same suspicious activity was detected again.';
 const MIN_WITHDRAWAL_POINTS = 10000;
 const WITHDRAWAL_STATUSES = ['Pending', 'Approved', 'Rejected', 'Paid'];
+const QUESTION_BANK_CLIENT_VERSION = '20260603-pyq-render-clean-v3';
+const AUTH_PROFILE_SEED_STORAGE_KEY = 'learnloot_auth_profile_seed';
+const PAUSED_TEST_STORAGE_KEY_PREFIX = 'learnloot_paused_test_v1';
+const PENDING_OFFLINE_ATTEMPT_STORAGE_KEY_PREFIX = 'learnloot_pending_offline_attempt_v1';
+const OFFLINE_AUTOSUBMIT_REASON = 'internet connection disconnected';
+const REFERRAL_REWARD_POINTS = 100;
 
 let currentUser = null;
 let selectedAvatar = DISPLAY_AVATARS[0];
@@ -60,16 +82,21 @@ let pausedTestState = null;
 let adminUsers = [];
 let adminAttempts = [];
 let adminWithdrawalRequests = [];
+let adminReferrals = [];
+let referralHistory = [];
 let adminLoadError = '';
+let pendingReferralSuccessMessage = '';
 let adminPanelVisible = false;
 let isSubmittingWithdrawal = false;
 const updatingWithdrawalRequestIds = new Set();
+const updatingReferralRecordIds = new Set();
 let cheatLog = null;
 let currentQuestionStartedAt = 0;
 let questionResumeCarryMs = 0;
 let fullscreenWarningGiven = false;
 let pendingRuleWarningAction = null;
 let pendingPreQuizInstructionAction = null;
+let pendingQuizScoringAction = null;
 let chapterCatalog = [];
 let chapterCatalogLoadPromise = null;
 let leaderboardFetchedAt = 0;
@@ -86,13 +113,22 @@ let recordingPendingUploads = new Set();
 let recordingBasePath = '';
 let recordingStudentId = '';
 let recordingQuizId = '';
+let recordingLastUploadError = '';
 let selectedSidebarAvatar = '';
 const adminRecordingAvailabilityCache = new Map();
 const adminAutoMergeAttemptIds = new Set();
 const adminAutoMergeFailedAttemptIds = new Set();
 const adminAutoMergeErrorMessages = new Map();
+const adminLocalMergedRecordingUrls = new Map();
 let adminRecordingValidationRun = 0;
 let adminRecordingAutoRefreshTimer = null;
+let offlineAutoSubmitInProgress = false;
+let pendingOfflineSubmitInProgress = false;
+
+function getDisplayAvatar(value) {
+    const avatar = String(value || '').trim();
+    return LEGACY_AVATAR_MAP[avatar] || avatar || DISPLAY_AVATARS[0];
+}
 
 function getNumericValue(value, fallback = 0) {
     const number = Number(value);
@@ -100,6 +136,14 @@ function getNumericValue(value, fallback = 0) {
 
     const fallbackNumber = Number(fallback);
     return Number.isFinite(fallbackNumber) ? fallbackNumber : 0;
+}
+
+function normalizeReferralCode(value) {
+    return String(value || '')
+        .trim()
+        .toUpperCase()
+        .replace(/[^A-Z0-9]/g, '')
+        .slice(0, 20);
 }
 
 function getCashEarnedDisplayValue(value = totalPoints) {
@@ -123,6 +167,14 @@ function ensureBackendOrFallbackAvailable() {
     throw new Error(getBackendRequiredMessage());
 }
 
+function getBackendModeHeaders() {
+    const mode = String(backendConfig.mode || 'cloud').trim().toLowerCase();
+    const isSameOriginBackend = typeof window !== 'undefined'
+        && BACKEND_API_BASE_URL
+        && BACKEND_API_BASE_URL.startsWith(window.location.origin);
+    return isSameOriginBackend ? { 'X-LearnLoot-Backend-Mode': mode || 'cloud' } : {};
+}
+
 function range(start, end) {
     return Array.from(
         { length: Math.max(0, Number(end || 0) - Number(start || 0) + 1) },
@@ -143,15 +195,19 @@ function getChapterQuestionCount(chapter) {
 }
 
 function getChapterPartCount(chapter) {
-    return Math.max(1, Number(getChapterRecord(chapter)?.totalParts || 1));
+    const totalParts = Number(getChapterRecord(chapter)?.totalParts ?? 0);
+    return Number.isFinite(totalParts) ? Math.max(0, totalParts) : 0;
 }
 
 function getChapterPartInfo(chapter, partNumber = 1) {
     const chapterRecord = getChapterRecord(chapter);
     const totalQuestions = Number(chapterRecord?.totalQuestions || 0);
-    const totalParts = Math.max(1, Number(chapterRecord?.totalParts || 1));
+    const rawTotalParts = Number(chapterRecord?.totalParts ?? 0);
+    const totalParts = totalQuestions > 0 ? Math.max(1, rawTotalParts || 1) : 0;
     const partSize = Math.max(1, Number(chapterRecord?.perPart || CHAPTER_PART_SIZE));
-    const safePartNumber = Math.min(Math.max(Number(partNumber) || 1, 1), totalParts);
+    const safePartNumber = totalParts > 0
+        ? Math.min(Math.max(Number(partNumber) || 1, 1), totalParts)
+        : 0;
     const questionCount = Math.min(partSize, totalQuestions);
 
     return {
@@ -161,7 +217,7 @@ function getChapterPartInfo(chapter, partNumber = 1) {
         startIndex: 0,
         endIndex: questionCount,
         questionCount,
-        label: `Part ${safePartNumber} (${questionCount} random questions)`
+        label: `Quiz ${safePartNumber} (${questionCount} random questions)`
     };
 }
 
@@ -170,7 +226,9 @@ function cloneQuizQuestion(question = {}) {
         questionId: String(question.questionId || ''),
         questionNumber: Number(question.questionNumber || 0),
         q: String(question.q || ''),
-        o: Array.isArray(question.o) ? question.o.map((option) => String(option || '')) : []
+        qHtml: String(question.qHtml || ''),
+        o: Array.isArray(question.o) ? question.o.map((option) => String(option || '')) : [],
+        oHtml: Array.isArray(question.oHtml) ? question.oHtml.map((option) => String(option || '')) : []
     };
 
     return clonedQuestion;
@@ -180,6 +238,410 @@ function getPausedQuestionList(pausedState) {
     return Array.isArray(pausedState?.qList)
         ? pausedState.qList.map(cloneQuizQuestion)
         : [];
+}
+
+function isPausedTestStateCurrent(pausedState) {
+    if (!pausedState) return true;
+    return String(pausedState.questionBankVersion || '') === QUESTION_BANK_CLIENT_VERSION;
+}
+
+function clearStalePausedTestState() {
+    if (pausedTestState && !isPausedTestStateCurrent(pausedTestState)) {
+        setPausedTestState(null);
+    }
+}
+
+function getPausedTestStorageOwner() {
+    return String(currentUser?.uid || auth?.currentUser?.uid || currentUser?.email || auth?.currentUser?.email || '').trim();
+}
+
+function getPausedTestStorageKey(ownerId = getPausedTestStorageOwner()) {
+    const safeOwner = sanitizeStorageSegment(ownerId || 'guest', 'guest');
+    return `${PAUSED_TEST_STORAGE_KEY_PREFIX}:${safeOwner}`;
+}
+
+function normalizeStoredPausedTestState(rawValue = null) {
+    const wrapper = rawValue && typeof rawValue === 'object' && rawValue.state
+        ? rawValue
+        : { state: rawValue };
+    const state = wrapper.state;
+    if (!state || typeof state !== 'object') return null;
+    if (!isPausedTestStateCurrent(state)) return null;
+
+    const ownerId = String(state.ownerId || wrapper.ownerId || '').trim();
+    const currentOwnerId = getPausedTestStorageOwner();
+    if (ownerId && currentOwnerId && ownerId !== currentOwnerId) return null;
+
+    const chapter = String(state.chapter || '').trim();
+    const quizAttemptId = String(state.quizAttemptId || state.clientAttemptId || '').trim();
+    const qListFromState = getPausedQuestionList(state);
+    if (!chapter || !quizAttemptId || qListFromState.length === 0) return null;
+
+    const normalizeAnswer = (value) => {
+        if (value === null || typeof value === 'undefined' || value === '') return null;
+        const number = Number(value);
+        return Number.isInteger(number) && number >= 0 ? number : null;
+    };
+    const rawAnswers = Array.isArray(state.answers) ? state.answers : [];
+    const rawMarked = Array.isArray(state.marked) ? state.marked : [];
+    const rawTimedOut = Array.isArray(state.timedOutQuestions) ? state.timedOutQuestions : [];
+    const rawIndex = Number(state.index || 0);
+    const safeIndex = Math.min(
+        Math.max(Number.isFinite(rawIndex) ? Math.floor(rawIndex) : 0, 0),
+        Math.max(qListFromState.length - 1, 0)
+    );
+    const snapshot = state.testStartSnapshot && typeof state.testStartSnapshot === 'object'
+        ? state.testStartSnapshot
+        : {
+            totalPoints: getNumericValue(state.totalPoints, totalPoints),
+            testsCompleted: getNumericValue(state.testsCompleted, testsCompleted),
+            totalTimeSpent: getNumericValue(state.totalTimeSpent, totalTimeSpent),
+            totalCorrectAnswers: getNumericValue(state.totalCorrectAnswers, totalCorrectAnswers),
+            totalQuestionsAttempted: getNumericValue(state.totalQuestionsAttempted, totalQuestionsAttempted)
+        };
+
+    return {
+        ...state,
+        ownerId: currentOwnerId || ownerId,
+        savedAt: Number(state.savedAt || wrapper.savedAt || Date.now()),
+        chapter,
+        partNumber: Number(state.partNumber || 1),
+        partLabel: String(state.partLabel || ''),
+        quizAttemptId,
+        quizSeed: String(state.quizSeed || ''),
+        questionIds: Array.isArray(state.questionIds)
+            ? state.questionIds.map((id) => String(id || '')).filter(Boolean)
+            : [],
+        qList: qListFromState,
+        index: safeIndex,
+        answers: Array.from({ length: qListFromState.length }, (_, i) => normalizeAnswer(rawAnswers[i])),
+        marked: Array.from({ length: qListFromState.length }, (_, i) => Boolean(rawMarked[i])),
+        timedOutQuestions: Array.from({ length: qListFromState.length }, (_, i) => Boolean(rawTimedOut[i])),
+        time: Math.max(0, Number(state.time ?? QUIZ_TOTAL_SECONDS)),
+        elapsedTimeBeforePauseMs: Math.max(0, Number(state.elapsedTimeBeforePauseMs || 0)),
+        currentQuestionElapsedMsBeforePause: Math.max(0, Number(state.currentQuestionElapsedMsBeforePause || 0)),
+        cheatLog: cloneCheatLog(state.cheatLog),
+        testStartSnapshot: {
+            totalPoints: getNumericValue(snapshot.totalPoints),
+            testsCompleted: getNumericValue(snapshot.testsCompleted),
+            totalTimeSpent: getNumericValue(snapshot.totalTimeSpent),
+            totalCorrectAnswers: getNumericValue(snapshot.totalCorrectAnswers),
+            totalQuestionsAttempted: getNumericValue(snapshot.totalQuestionsAttempted)
+        }
+    };
+}
+
+function savePausedTestStateToStorage(state) {
+    const normalizedState = normalizeStoredPausedTestState(state);
+    if (!normalizedState) return;
+
+    try {
+        localStorage.setItem(getPausedTestStorageKey(normalizedState.ownerId), JSON.stringify({
+            ownerId: normalizedState.ownerId,
+            savedAt: normalizedState.savedAt,
+            state: normalizedState
+        }));
+    } catch (error) {
+        console.warn('Could not save quiz progress locally:', error);
+    }
+}
+
+function clearPausedTestStateStorage(ownerId = getPausedTestStorageOwner()) {
+    if (!ownerId) return;
+
+    try {
+        localStorage.removeItem(getPausedTestStorageKey(ownerId));
+    } catch (error) {
+        console.warn('Could not clear saved quiz progress:', error);
+    }
+}
+
+function setPausedTestState(nextState, options = {}) {
+    const { persist = true } = options;
+    pausedTestState = nextState ? normalizeStoredPausedTestState(nextState) : null;
+
+    if (!persist) return;
+    if (pausedTestState) {
+        savePausedTestStateToStorage(pausedTestState);
+    } else {
+        clearPausedTestStateStorage();
+    }
+}
+
+function restorePausedTestStateFromStorage() {
+    const ownerId = getPausedTestStorageOwner();
+    if (!ownerId) {
+        setPausedTestState(null, { persist: false });
+        return null;
+    }
+
+    try {
+        const raw = localStorage.getItem(getPausedTestStorageKey(ownerId));
+        const restoredState = raw ? normalizeStoredPausedTestState(JSON.parse(raw)) : null;
+        if (raw && !restoredState) {
+            setPausedTestState(null);
+            return null;
+        }
+        if (
+            restoredState
+            && hasAttemptedQuizPart(restoredState.chapter, restoredState.partNumber)
+        ) {
+            setPausedTestState(null);
+            return null;
+        }
+        setPausedTestState(restoredState, { persist: Boolean(restoredState) });
+        return pausedTestState;
+    } catch (error) {
+        console.warn('Could not restore saved quiz progress:', error);
+        setPausedTestState(null);
+        return null;
+    }
+}
+
+function getPendingOfflineAttemptStorageKey(ownerId = getPausedTestStorageOwner()) {
+    const safeOwner = sanitizeStorageSegment(ownerId || 'guest', 'guest');
+    return `${PENDING_OFFLINE_ATTEMPT_STORAGE_KEY_PREFIX}:${safeOwner}`;
+}
+
+function normalizePendingOfflineAttempt(rawValue = null) {
+    const wrapper = rawValue && typeof rawValue === 'object' && rawValue.attempt
+        ? rawValue
+        : { attempt: rawValue };
+    const attempt = wrapper.attempt;
+    if (!attempt || typeof attempt !== 'object') return null;
+
+    const ownerId = String(wrapper.ownerId || attempt.userId || '').trim();
+    const currentOwnerId = getPausedTestStorageOwner();
+    if (ownerId && currentOwnerId && ownerId !== currentOwnerId) return null;
+
+    const clientAttemptId = String(attempt.clientAttemptId || '').trim();
+    const quizSeed = String(attempt.quizSeed || '').trim();
+    if (!clientAttemptId || !quizSeed) return null;
+
+    return {
+        ownerId: currentOwnerId || ownerId,
+        savedAt: Number(wrapper.savedAt || Date.now()),
+        reason: String(wrapper.reason || OFFLINE_AUTOSUBMIT_REASON),
+        attempt: {
+            ...attempt,
+            clientAttemptId,
+            quizSeed
+        }
+    };
+}
+
+function savePendingOfflineAttempt(attempt, reason = OFFLINE_AUTOSUBMIT_REASON) {
+    const ownerId = getPausedTestStorageOwner();
+    if (!ownerId || !attempt) return;
+
+    try {
+        localStorage.setItem(getPendingOfflineAttemptStorageKey(ownerId), JSON.stringify({
+            ownerId,
+            savedAt: Date.now(),
+            reason,
+            attempt
+        }));
+    } catch (error) {
+        console.warn('Could not save pending offline quiz submission:', error);
+    }
+}
+
+function getPendingOfflineAttempt() {
+    const ownerId = getPausedTestStorageOwner();
+    if (!ownerId) return null;
+
+    try {
+        const raw = localStorage.getItem(getPendingOfflineAttemptStorageKey(ownerId));
+        return raw ? normalizePendingOfflineAttempt(JSON.parse(raw)) : null;
+    } catch (error) {
+        console.warn('Could not read pending offline quiz submission:', error);
+        return null;
+    }
+}
+
+function clearPendingOfflineAttemptStorage(ownerId = getPausedTestStorageOwner()) {
+    if (!ownerId) return;
+
+    try {
+        localStorage.removeItem(getPendingOfflineAttemptStorageKey(ownerId));
+    } catch (error) {
+        console.warn('Could not clear pending offline quiz submission:', error);
+    }
+}
+
+function isLikelyOfflineError(error) {
+    const message = String(error?.message || error || '').toLowerCase();
+    return (typeof navigator !== 'undefined' && navigator.onLine === false)
+        || message.includes('failed to fetch')
+        || message.includes('network')
+        || message.includes('offline')
+        || message.includes('internet');
+}
+
+function renderPendingOfflineSubmission(attempt = {}, reason = OFFLINE_AUTOSUBMIT_REASON) {
+    const scoreDisplay = document.getElementById('score-display');
+    const reviewSection = document.getElementById('review-section');
+    const attemptedCount = Array.isArray(attempt.answers)
+        ? attempt.answers.filter((answer) => Number.isInteger(answer)).length
+        : Number(attempt.attemptedCount || 0);
+    const total = Number(attempt.total || qList.length || 0);
+
+    if (scoreDisplay) {
+        scoreDisplay.innerHTML = `
+            <h3>Quiz auto-submitted</h3>
+            <p class="auth-status warning">${escapeHtml(reason)}. Your answers so far were locked and saved on this device.</p>
+            <div class="score-display">${attemptedCount}/${total}</div>
+            <div style="font-size:1rem;color:var(--text-secondary);margin-top:0.75rem;">
+                This pending submission will sync automatically when internet is back.
+            </div>
+        `;
+    }
+
+    if (reviewSection) {
+        reviewSection.innerHTML = '';
+    }
+}
+
+function createCurrentAttemptPayload({
+    score = 0,
+    accuracy = 0,
+    points = 0,
+    timeSpent = 0,
+    systemReason = ''
+} = {}) {
+    const total = qList.length || 0;
+    const attemptedCount = answers.filter((answer) => Number.isInteger(answer)).length;
+    const timedOutCount = timedOutQuestions.filter(Boolean).length;
+    const finalizedCheatLog = cloneCheatLog(cheatLog, {
+        accuracy,
+        score,
+        total,
+        timeSpent
+    });
+
+    if (systemReason) {
+        finalizedCheatLog.reasons = Array.from(new Set([
+            ...(finalizedCheatLog.reasons || []),
+            systemReason
+        ]));
+    }
+
+    return {
+        clientAttemptId: currentQuizAttemptId,
+        chapter: currentChapter,
+        partNumber: currentPartNumber,
+        partLabel: currentPartLabel,
+        quizSeed: currentQuizSeed,
+        questionIds: [...currentQuestionIds],
+        difficulty: currentDifficulty,
+        score,
+        total,
+        accuracy,
+        attemptedCount,
+        incorrectCount: 0,
+        timedOutCount,
+        unattemptedCount: Math.max(0, total - attemptedCount - timedOutCount),
+        points,
+        answers: answers.map((answer) => Number.isInteger(answer) ? answer : null),
+        timedOutQuestions: timedOutQuestions.map(Boolean),
+        markedQuestions: marked.map(Boolean),
+        timestamp: Date.now(),
+        timeSpent,
+        userId: currentUser?.uid || '',
+        userName: currentUser?.name || 'Student',
+        userAvatar: getDisplayAvatar(currentUser?.avatar),
+        cheatLog: finalizedCheatLog
+    };
+}
+
+function markOfflineAttemptCompletedLocally(reason = OFFLINE_AUTOSUBMIT_REASON) {
+    if (!currentQuizAttemptId) return null;
+
+    syncQuizTimeRemaining();
+    const elapsedThisRun = startTime ? Math.max(0, Date.now() - startTime) : 0;
+    const timeSpent = Math.floor((elapsedTimeBeforePauseMs + elapsedThisRun) / 1000);
+    const attempt = createCurrentAttemptPayload({ timeSpent, systemReason: reason });
+
+    savePendingOfflineAttempt(attempt, reason);
+    recordAttemptLocally({
+        ...attempt,
+        localOnly: true,
+        pendingSync: true,
+        completedOffline: true
+    });
+    setPausedTestState(null);
+    generateChapterList();
+    return attempt;
+}
+
+async function retryPendingOfflineAttempt() {
+    if (pendingOfflineSubmitInProgress || !currentUser || (typeof navigator !== 'undefined' && navigator.onLine === false)) {
+        return;
+    }
+
+    const pending = getPendingOfflineAttempt();
+    if (!pending) return;
+
+    pendingOfflineSubmitInProgress = true;
+    try {
+        const response = await persistAttemptToCloud(pending.attempt);
+        const savedAttempt = normalizeAttemptData(response?.attempt || pending.attempt, currentUser);
+        recordAttemptLocally(savedAttempt);
+        clearPendingOfflineAttemptStorage(pending.ownerId);
+        showPointsNotification('Pending quiz submitted successfully.', 'points-added');
+        await loadCloudData().catch((error) => {
+            console.warn('Could not refresh cloud data after pending quiz submission:', error);
+        });
+        updateWallet();
+        updateDashboard();
+        renderLeaderboard();
+        renderCharts();
+        renderAdminDashboard();
+    } catch (error) {
+        console.warn('Pending offline quiz submission is still waiting for sync:', error);
+    } finally {
+        pendingOfflineSubmitInProgress = false;
+    }
+}
+
+function saveCurrentTestProgressThrottled(intervalMs = 5000) {
+    const now = Date.now();
+    if (now - lastProgressAutosaveAt < intervalMs) return;
+    saveCurrentTestProgress();
+}
+
+function saveActiveTestProgressForReload() {
+    if (!currentChapter || !testStartSnapshot) return;
+    saveCurrentTestProgress();
+}
+
+function markPageExitAndSaveTestProgress() {
+    pageExitInProgress = true;
+    saveActiveTestProgressForReload();
+}
+
+function clearHiddenViolationTimeout() {
+    if (hiddenViolationTimeout) {
+        clearTimeout(hiddenViolationTimeout);
+        hiddenViolationTimeout = null;
+    }
+}
+
+function handleVisibilityChangeForQuizProgress() {
+    saveActiveTestProgressForReload();
+    clearHiddenViolationTimeout();
+
+    if (!document.hidden) {
+        pageExitInProgress = false;
+        return;
+    }
+
+    hiddenViolationTimeout = setTimeout(() => {
+        hiddenViolationTimeout = null;
+        if (!pageExitInProgress && document.hidden) {
+            autoSubmitForCheatViolation('tabSwitchCount', 'tab switching');
+        }
+    }, 800);
 }
 
 async function ensureQuestionCatalogLoaded(options = {}) {
@@ -242,6 +704,30 @@ async function callBackend(path, options = {}) {
         headers: {
             'Authorization': `Bearer ${token}`,
             ...appCheckHeaders,
+            ...getBackendModeHeaders(),
+            'Content-Type': 'application/json',
+            ...(options.headers || {})
+        },
+        body: options.body ? JSON.stringify(options.body) : undefined
+    });
+
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+        throw new Error(payload.error || payload.detail || `Backend request failed with ${response.status}`);
+    }
+
+    return payload;
+}
+
+async function callPublicBackend(path, options = {}) {
+    if (!isBackendEnabled()) throw new Error('Backend API is not configured.');
+
+    const appCheckHeaders = await getAppCheckHeaders();
+    const response = await fetch(`${BACKEND_API_BASE_URL}${path}`, {
+        method: options.method || 'GET',
+        headers: {
+            ...appCheckHeaders,
+            ...getBackendModeHeaders(),
             'Content-Type': 'application/json',
             ...(options.headers || {})
         },
@@ -260,6 +746,9 @@ function applyCloudProfile(profile = {}) {
     if (!profile) return;
 
     totalPoints = getNumericValue(profile.totalPoints, totalPoints);
+    if (typeof profile.points !== 'undefined' && typeof profile.totalPoints === 'undefined') {
+        totalPoints = getNumericValue(profile.points, totalPoints);
+    }
     testsCompleted = getNumericValue(profile.testsCompleted, testsCompleted);
     totalTimeSpent = getNumericValue(profile.totalTimeSpent, totalTimeSpent);
     totalCorrectAnswers = getNumericValue(profile.totalCorrectAnswers, totalCorrectAnswers);
@@ -270,9 +759,13 @@ function applyCloudProfile(profile = {}) {
             ...currentUser,
             uid: profile.uid || currentUser.uid,
             name: profile.name || currentUser.name,
-            avatar: profile.avatar || currentUser.avatar,
+            avatar: getDisplayAvatar(profile.avatar || currentUser.avatar),
             email: profile.email || currentUser.email,
-            isAdmin: typeof profile.isAdmin === 'boolean' ? profile.isAdmin : currentUser.isAdmin
+            isAdmin: typeof profile.isAdmin === 'boolean' ? profile.isAdmin : currentUser.isAdmin,
+            referralCode: normalizeReferralCode(profile.referralCode || currentUser.referralCode),
+            referredBy: String(profile.referredBy || currentUser.referredBy || ''),
+            totalReferrals: getNumericValue(profile.totalReferrals ?? profile.numberOfReferrals ?? profile.noOfReferrals, currentUser.totalReferrals || 0),
+            referralPoints: getNumericValue(profile.referralPoints, currentUser.referralPoints || 0)
         };
     }
 }
@@ -306,9 +799,10 @@ function initApp() {
         if (!isBackendEnabled() && !canUseClientFirestoreFallback()) {
             setAuthStatus(getBackendRequiredMessage(), 'error');
         } else {
-            setAuthStatus('Create an account or sign in with email to continue.');
+            setAuthStatus('Create an account, sign in with email, or continue with Google.');
         }
         auth.onAuthStateChanged(handleAuthStateChanged);
+        handleGoogleRedirectResult();
     } else {
         setAuthStatus('Add your Firebase project keys in firebase-config.js before signing in.', 'error');
     }
@@ -350,9 +844,10 @@ function initApp() {
         }
     });
 
-    document.addEventListener('visibilitychange', () => {
-        if (document.hidden) autoSubmitForCheatViolation('tabSwitchCount', 'tab switching');
-    });
+    window.addEventListener('beforeunload', markPageExitAndSaveTestProgress);
+    window.addEventListener('pagehide', markPageExitAndSaveTestProgress);
+
+    document.addEventListener('visibilitychange', handleVisibilityChangeForQuizProgress);
 
     window.addEventListener('blur', () => {
         incrementCheatMetric('blurCount');
@@ -373,6 +868,9 @@ function initApp() {
     window.addEventListener('beforeprint', () => {
         handleScreenCaptureAttempt('printing or saving the quiz screen');
     });
+
+    window.addEventListener('offline', handleOfflineDuringQuiz);
+    window.addEventListener('online', handleOnlineAfterDisconnect);
 }
 
 function setAuthStatus(message, type = '') {
@@ -391,25 +889,31 @@ function scrollToPageTop(behavior = 'smooth') {
 }
 
 function resetAuthInputs() {
-    ['username-input', 'email-input', 'password-input'].forEach((fieldId) => {
+    ['username-input', 'email-input', 'password-input', 'referral-input'].forEach((fieldId) => {
         const field = document.getElementById(fieldId);
         if (field) {
             field.value = '';
             field.style.borderColor = '';
         }
     });
+    setReferralStatus('');
 }
 
 function resetUserState() {
     clearInterval(timer);
     clearQuestionAdvanceTimeout();
+    clearHiddenViolationTimeout();
+    pageExitInProgress = false;
     currentUser = null;
     leaderboard = [];
     leaderboardFetchedAt = 0;
     adminUsers = [];
     adminAttempts = [];
     adminWithdrawalRequests = [];
+    adminReferrals = [];
+    referralHistory = [];
     adminLoadError = '';
+    pendingReferralSuccessMessage = '';
     adminPanelVisible = false;
     isSubmittingWithdrawal = false;
     updatingWithdrawalRequestIds.clear();
@@ -428,7 +932,7 @@ function resetUserState() {
     currentQuestionIds = [];
     currentQuizAttemptId = '';
     testStartSnapshot = null;
-    pausedTestState = null;
+    setPausedTestState(null, { persist: false });
     elapsedTimeBeforePauseMs = 0;
     cheatLog = null;
     currentQuestionStartedAt = 0;
@@ -447,8 +951,116 @@ function getAuthFormValues() {
     return {
         name: (document.getElementById('username-input')?.value || '').trim(),
         email: (document.getElementById('email-input')?.value || '').trim(),
-        password: document.getElementById('password-input')?.value || ''
+        password: document.getElementById('password-input')?.value || '',
+        referralCode: normalizeReferralCode(document.getElementById('referral-input')?.value || '')
     };
+}
+
+function getReferralCodeFromUrl() {
+    try {
+        const params = new URLSearchParams(window.location.search);
+        return normalizeReferralCode(params.get('ref'));
+    } catch (error) {
+        return '';
+    }
+}
+
+function setReferralStatus(message = '', type = '') {
+    const statusEl = document.getElementById('referral-status');
+    if (!statusEl) return;
+    statusEl.textContent = message || '';
+    statusEl.className = type ? `referral-status ${type}` : 'referral-status';
+}
+
+function handleReferralInputChange() {
+    const input = document.getElementById('referral-input');
+    if (!input) return;
+    input.value = normalizeReferralCode(input.value);
+    setReferralStatus(input.value ? 'Referral code will be checked before signup.' : '');
+}
+
+function hydrateReferralCodeFromUrl() {
+    const input = document.getElementById('referral-input');
+    if (!input || input.value) return;
+
+    const referralCode = getReferralCodeFromUrl();
+    if (referralCode) {
+        input.value = referralCode;
+        setReferralStatus('Referral code detected from your invite link.');
+    }
+}
+
+function getReferralClientInfo() {
+    const screenValue = window.screen
+        ? `${window.screen.width || 0}x${window.screen.height || 0}`
+        : '';
+    return {
+        userAgent: navigator.userAgent || '',
+        language: navigator.language || '',
+        platform: navigator.platform || '',
+        screen: screenValue,
+        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || ''
+    };
+}
+
+async function validateReferralCodeForSignup(referralCode) {
+    const code = normalizeReferralCode(referralCode);
+    if (!code) {
+        setReferralStatus('');
+        return '';
+    }
+
+    setReferralStatus('Checking referral code...', '');
+
+    try {
+        const response = await callPublicBackend(`/api/referrals/validate?code=${encodeURIComponent(code)}`);
+        const validCode = normalizeReferralCode(response.referralCode || code);
+        setReferralStatus('Referral code applied successfully.', 'success');
+        return validCode;
+    } catch (error) {
+        setReferralStatus(error.message || 'Invalid referral code.', 'error');
+        throw error;
+    }
+}
+
+function normalizeAuthProfileSeed(seed = {}) {
+    return {
+        name: String(seed.name || '').trim().slice(0, 20),
+        avatar: getDisplayAvatar(seed.avatar || selectedAvatar || DISPLAY_AVATARS[0]),
+        referralCode: normalizeReferralCode(seed.referralCode),
+        clientInfo: seed.clientInfo && typeof seed.clientInfo === 'object' ? seed.clientInfo : getReferralClientInfo()
+    };
+}
+
+function getStoredAuthProfileSeed() {
+    try {
+        const rawSeed = sessionStorage.getItem(AUTH_PROFILE_SEED_STORAGE_KEY);
+        return rawSeed ? normalizeAuthProfileSeed(JSON.parse(rawSeed)) : null;
+    } catch (error) {
+        return null;
+    }
+}
+
+function setPendingAuthProfileSeed(seed, persist = false) {
+    const normalizedSeed = normalizeAuthProfileSeed(seed);
+    pendingProfileSeed = normalizedSeed;
+
+    try {
+        if (persist) {
+            sessionStorage.setItem(AUTH_PROFILE_SEED_STORAGE_KEY, JSON.stringify(normalizedSeed));
+        }
+    } catch (error) {
+        console.warn('Could not store pending auth profile seed:', error);
+    }
+}
+
+function clearPendingAuthProfileSeed() {
+    pendingProfileSeed = null;
+    try {
+        sessionStorage.removeItem(AUTH_PROFILE_SEED_STORAGE_KEY);
+    } catch (error) {
+        console.warn('Could not clear pending auth profile seed:', error);
+    }
 }
 
 function highlightField(fieldId) {
@@ -488,6 +1100,10 @@ function formatFirebaseError(error) {
         'auth/missing-password': 'Please enter your password.',
         'auth/operation-not-allowed': 'This sign-in method is not enabled in Firebase yet.',
         'auth/account-exists-with-different-credential': 'This email already uses another sign-in method.',
+        'auth/cancelled-popup-request': 'Another Google sign-in window was already open. Please try again.',
+        'auth/operation-not-supported-in-this-environment': 'Google sign-in needs this page to be opened from a web address, not directly as a file.',
+        'auth/popup-blocked': 'Your browser blocked the Google sign-in popup. Please allow popups or try again.',
+        'auth/popup-closed-by-user': 'Google sign-in was closed before finishing.',
         'auth/too-many-requests': 'Too many attempts. Please wait a moment and try again.',
         'auth/unauthorized-domain': 'This domain is not allowed in Firebase Authentication yet.',
         'auth/user-disabled': 'This account has been disabled in Firebase.',
@@ -624,13 +1240,14 @@ function normalizeAttemptData(rawAttempt = {}, userMeta = {}) {
         difficulty: rawAttempt.difficulty || 'all',
         score: Number(rawAttempt.score || 0),
         total: Number(rawAttempt.total || 0),
+        partNumber: Number(rawAttempt.partNumber || 1),
         accuracy: Number(rawAttempt.accuracy || 0),
         points: Number(rawAttempt.points || 0),
         timestamp: Number(rawAttempt.timestamp || Date.now()),
         timeSpent: Number(rawAttempt.timeSpent || 0),
         userId: rawAttempt.userId || userMeta.uid || '',
         userName: rawAttempt.userName || userMeta.name || 'Student',
-        userAvatar: rawAttempt.userAvatar || userMeta.avatar || DISPLAY_AVATARS[0]
+        userAvatar: getDisplayAvatar(rawAttempt.userAvatar || userMeta.avatar || DISPLAY_AVATARS[0])
     };
 
     attempt.cheatLog = normalizeCheatLog(rawAttempt.cheatLog, attempt);
@@ -658,6 +1275,27 @@ function isPrintShortcut(e) {
 function handleScreenCaptureAttempt(reason) {
     if (!isQuizSessionActive() || isSubmittingTest) return;
     autoSubmitForCheatViolation('screenshotAttemptCount', reason);
+}
+
+function handleOfflineDuringQuiz() {
+    if (!isQuizSessionActive() || isSubmittingTest || offlineAutoSubmitInProgress) return;
+
+    offlineAutoSubmitInProgress = true;
+    if (!cheatLog) cheatLog = createEmptyCheatLog();
+    markOfflineAttemptCompletedLocally(OFFLINE_AUTOSUBMIT_REASON);
+    showPointsNotification('Internet disconnected. Auto-submitting current answers.', 'points-lost');
+    submitTest({
+        silent: true,
+        systemReason: OFFLINE_AUTOSUBMIT_REASON,
+        queueOnFailure: true
+    }).finally(() => {
+        offlineAutoSubmitInProgress = false;
+    });
+}
+
+function handleOnlineAfterDisconnect() {
+    offlineAutoSubmitInProgress = false;
+    retryPendingOfflineAttempt();
 }
 
 // ============================================================
@@ -700,13 +1338,7 @@ function getPreQuizRecordingInstructionText() {
         '- Keep only your solving paper or notebook and required writing tools with you.',
         '- Anything in your hand other than solving paper, notebook, or writing tools may be treated as cheating.',
         '- Books, phones, hidden devices, extra notes, another person, or repeated suspicious movement may also be treated as cheating.',
-        '- If cheating is suspected, the cash earned from this quiz may be marked invalid.',
-        '',
-        'Question Navigation Rules',
-        '- Questions must be solved in order.',
-        '- You may leave a question unanswered and move to the next question.',
-        '- Once you move forward, you cannot return to the previous question or attempt it again.',
-        '- Jumping directly to another question is disabled.',
+        '- If cheating is suspected, the wallet rewards from this quiz may be marked invalid.',
         '',
         'Continue only if you understand and agree to follow these rules.'
     ].join('\n');
@@ -740,6 +1372,46 @@ function closePreQuizRecordingInstructions(accepted = false) {
     if (action) action(Boolean(accepted));
 }
 
+function getQuizScoringPopupText() {
+    return `Scoring rule: +${POINTS_PER_QUESTION} wallet points for every correct answer and -${INCORRECT_POINTS_PENALTY} wallet points for every incorrect answer.`;
+}
+
+function showQuizScoringPopup() {
+    const modal = document.getElementById('quiz-scoring-modal');
+    if (!modal) {
+        alert(getQuizScoringPopupText());
+        return Promise.resolve();
+    }
+
+    if (pendingQuizScoringAction) {
+        pendingQuizScoringAction();
+        pendingQuizScoringAction = null;
+    }
+
+    const correctPoints = document.getElementById('quiz-scoring-correct-points');
+    const incorrectPoints = document.getElementById('quiz-scoring-incorrect-points');
+    if (correctPoints) correctPoints.textContent = `+${POINTS_PER_QUESTION}`;
+    if (incorrectPoints) incorrectPoints.textContent = `-${INCORRECT_POINTS_PENALTY}`;
+
+    modal.style.display = 'flex';
+
+    return new Promise((resolve) => {
+        pendingQuizScoringAction = resolve;
+        setTimeout(() => {
+            document.getElementById('quiz-scoring-start-btn')?.focus();
+        }, 0);
+    });
+}
+
+function closeQuizScoringPopup() {
+    const modal = document.getElementById('quiz-scoring-modal');
+    if (modal) modal.style.display = 'none';
+
+    const action = pendingQuizScoringAction;
+    pendingQuizScoringAction = null;
+    if (action) action();
+}
+
 function autoSubmitTest(reason = AUTO_SUBMIT_MESSAGE) {
     if (!isQuizSessionActive() || isSubmittingTest) return;
 
@@ -748,7 +1420,6 @@ function autoSubmitTest(reason = AUTO_SUBMIT_MESSAGE) {
     cheatLog.autoSubmitReason = reason;
 
     sessionPoints = 0;
-    totalPoints = 0;
     updateWallet();
     updateDashboard();
     showViolationModal(reason, 'AUTO_SUBMIT');
@@ -828,10 +1499,9 @@ function autoSubmitForCheatViolation(metricName, reason) {
     cheatLog.autoSubmitted = true;
     cheatLog.autoSubmitReason = reason;
     sessionPoints = 0;
-    totalPoints = 0;
     updateWallet();
     updateDashboard();
-    showPointsNotification('Rule violation detected. Test auto-submitted and cash earned reset to 0.', 'points-lost');
+    showPointsNotification('Rule violation detected. Test auto-submitted. This quiz reward is cancelled.', 'points-lost');
     submitTest({ silent: true, violationReason: reason });
 }
 
@@ -900,6 +1570,85 @@ function getFirebaseStorageErrorMessage(error) {
     return [code, message].filter(Boolean).join(': ') || 'Firebase Storage upload failed.';
 }
 
+async function verifyMicrophoneSignal(stream, durationMs = 1400) {
+    const audioTracks = stream?.getAudioTracks ? stream.getAudioTracks() : [];
+    if (!audioTracks.length) {
+        return {
+            ok: false,
+            message: 'Microphone was not found. Connect or enable a microphone, then start the quiz again.'
+        };
+    }
+
+    audioTracks.forEach((track) => {
+        track.enabled = true;
+    });
+
+    const blockedTrack = audioTracks.find((track) => track.readyState !== 'live' || track.muted);
+    if (blockedTrack) {
+        return {
+            ok: false,
+            message: 'Microphone is muted or inactive. Allow microphone access and unmute your input device.'
+        };
+    }
+
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextClass) {
+        return { ok: true, message: '' };
+    }
+
+    let audioContext = null;
+    let source = null;
+    try {
+        audioContext = new AudioContextClass();
+        if (audioContext.state === 'suspended' && typeof audioContext.resume === 'function') {
+            await audioContext.resume();
+        }
+
+        const audioOnlyStream = new MediaStream(audioTracks);
+        source = audioContext.createMediaStreamSource(audioOnlyStream);
+        const analyser = audioContext.createAnalyser();
+        analyser.fftSize = 2048;
+        source.connect(analyser);
+
+        const data = new Uint8Array(analyser.fftSize);
+        let peak = 0;
+        let total = 0;
+        let samples = 0;
+        const startedAt = Date.now();
+
+        while (Date.now() - startedAt < durationMs) {
+            analyser.getByteTimeDomainData(data);
+            for (let i = 0; i < data.length; i += 1) {
+                const level = Math.abs(data[i] - 128) / 128;
+                peak = Math.max(peak, level);
+                total += level;
+                samples += 1;
+            }
+            await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+
+        const average = samples ? total / samples : 0;
+        if (peak > 0.008 || average > 0.0008) {
+            return { ok: true, peak, average, message: '' };
+        }
+
+        return {
+            ok: false,
+            peak,
+            average,
+            message: 'Microphone permission was granted, but no sound was detected. Unmute your mic, select the correct input device, speak once, and try again.'
+        };
+    } catch (error) {
+        console.warn('Microphone signal check failed:', error);
+        return { ok: true, message: '' };
+    } finally {
+        if (source && typeof source.disconnect === 'function') source.disconnect();
+        if (audioContext && typeof audioContext.close === 'function') {
+            audioContext.close().catch(() => {});
+        }
+    }
+}
+
 function getRecordingFirestore() {
     if (!db) {
         throw new Error('Firestore is not available. Check Firebase initialization.');
@@ -912,6 +1661,25 @@ function getCompatRecordingStorage() {
         throw new Error('Firebase Storage is not available in this page.');
     }
     return firebaseApp.storage();
+}
+
+function getRecordingChunkContentType(blob) {
+    const blobType = String(blob?.type || '').trim();
+    return blobType && /^video\/webm/i.test(blobType)
+        ? blobType
+        : 'video/webm;codecs=vp8,opus';
+}
+
+function blobToBase64(blob) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+            const result = String(reader.result || '');
+            resolve(result.includes(',') ? result.split(',').pop() : result);
+        };
+        reader.onerror = () => reject(reader.error || new Error('Recording chunk could not be read.'));
+        reader.readAsDataURL(blob);
+    });
 }
 
 function getRecordingDocRef(attemptId = currentRecordingAttemptId) {
@@ -956,7 +1724,7 @@ async function createRecordingMetadataDocument() {
         partNumber: Number(currentPartNumber || 0),
         partLabel: currentPartLabel || '',
         userName: currentUser?.name || 'Student',
-        userAvatar: currentUser?.avatar || 'ST',
+        userAvatar: getDisplayAvatar(currentUser?.avatar),
         status: 'recording',
         startedAt: firebase.firestore.FieldValue.serverTimestamp(),
         endedAt: null,
@@ -985,13 +1753,58 @@ function uploadTaskToPromise(uploadTask, onProgress) {
     });
 }
 
+async function markRecordingChunkUploaded({
+    attemptId,
+    index,
+    path,
+    downloadURL = '',
+    size = 0,
+    contentType = 'video/webm;codecs=vp8,opus',
+    uploadedVia = 'client'
+}) {
+    recordingUploadedChunkCount = Math.max(recordingUploadedChunkCount, index);
+    recordingLastUploadError = '';
+
+    try {
+        await getRecordingChunkDocRef(attemptId, index).set({
+            index,
+            path,
+            downloadURL,
+            size,
+            contentType,
+            status: 'uploaded',
+            uploadedVia,
+            uploadedAt: firebase.firestore.FieldValue.serverTimestamp()
+        }, { merge: true });
+    } catch (error) {
+        console.warn(`Recording chunk ${index} uploaded to Storage but Firestore metadata could not be saved:`, error);
+    }
+
+    try {
+        await getRecordingDocRef(attemptId).set({
+            chunkCount: recordingUploadedChunkCount,
+            updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+        }, { merge: true });
+    } catch (error) {
+        console.warn('Recording chunk count could not be updated in Firestore:', error);
+    }
+
+    updateRecordingUi({
+        status: 'Recording in progress',
+        progress: `Uploaded ${recordingUploadedChunkCount} chunk${recordingUploadedChunkCount === 1 ? '' : 's'}`
+    });
+
+    return { index, path, downloadURL };
+}
+
 async function uploadRecordingChunkOnce(blob, index) {
     const attemptId = sanitizeStorageSegment(currentRecordingAttemptId || Date.now(), String(Date.now()));
     const path = `${recordingBasePath}/chunks/chunk_${String(index).padStart(4, '0')}.webm`;
+    const contentType = getRecordingChunkContentType(blob);
     const storageRef = getCompatRecordingStorage().ref(path);
     const snapshot = await uploadTaskToPromise(
         storageRef.put(blob, {
-            contentType: 'video/webm',
+            contentType,
             customMetadata: {
                 studentId: recordingStudentId,
                 quizId: recordingQuizId,
@@ -1006,30 +1819,100 @@ async function uploadRecordingChunkOnce(blob, index) {
             });
         }
     );
-    const downloadURL = await snapshot.ref.getDownloadURL();
+    let downloadURL = '';
+    try {
+        downloadURL = await snapshot.ref.getDownloadURL();
+    } catch (error) {
+        console.warn(`Recording chunk ${index} uploaded but download URL could not be created:`, error);
+    }
 
-    await getRecordingChunkDocRef(attemptId, index).set({
+    return markRecordingChunkUploaded({
+        attemptId,
         index,
         path,
         downloadURL,
         size: blob.size,
-        contentType: blob.type || 'video/webm;codecs=vp8,opus',
-        status: 'uploaded',
-        uploadedAt: firebase.firestore.FieldValue.serverTimestamp()
-    }, { merge: true });
+        contentType,
+        uploadedVia: 'client_blob'
+    });
+}
 
-    recordingUploadedChunkCount = Math.max(recordingUploadedChunkCount, index);
-    await getRecordingDocRef(attemptId).set({
-        chunkCount: recordingUploadedChunkCount,
-        updatedAt: firebase.firestore.FieldValue.serverTimestamp()
-    }, { merge: true });
+async function uploadRecordingChunkStringOnce(blob, index) {
+    const attemptId = sanitizeStorageSegment(currentRecordingAttemptId || Date.now(), String(Date.now()));
+    const path = `${recordingBasePath}/chunks/chunk_${String(index).padStart(4, '0')}.webm`;
+    const contentType = getRecordingChunkContentType(blob);
+    const dataBase64 = await blobToBase64(blob);
+    const storageRef = getCompatRecordingStorage().ref(path);
+    const snapshot = await uploadTaskToPromise(
+        storageRef.putString(dataBase64, 'base64', {
+            contentType,
+            customMetadata: {
+                studentId: recordingStudentId,
+                quizId: recordingQuizId,
+                attemptId,
+                chunkIndex: String(index),
+                uploadedVia: 'client_base64'
+            }
+        }),
+        (percent) => {
+            updateRecordingUi({
+                status: 'Recording in progress',
+                progress: `Retrying chunk ${index}: ${percent}%`
+            });
+        }
+    );
+    let downloadURL = '';
+    try {
+        downloadURL = await snapshot.ref.getDownloadURL();
+    } catch (error) {
+        console.warn(`Recording chunk ${index} base64 upload succeeded but download URL could not be created:`, error);
+    }
 
+    return markRecordingChunkUploaded({
+        attemptId,
+        index,
+        path,
+        downloadURL,
+        size: blob.size,
+        contentType,
+        uploadedVia: 'client_base64'
+    });
+}
+
+async function uploadRecordingChunkViaBackend(blob, index) {
+    if (!isBackendEnabled()) {
+        throw new Error('Backend API is not configured for recording upload fallback.');
+    }
+
+    const attemptId = sanitizeStorageSegment(currentRecordingAttemptId || Date.now(), String(Date.now()));
+    const contentType = getRecordingChunkContentType(blob);
+    const dataBase64 = await blobToBase64(blob);
     updateRecordingUi({
         status: 'Recording in progress',
-        progress: `Uploaded ${recordingUploadedChunkCount} chunk${recordingUploadedChunkCount === 1 ? '' : 's'}`
+        progress: `Uploading chunk ${index} through backend`
     });
 
-    return { index, path, downloadURL };
+    const response = await callBackend('/api/recordings/chunks', {
+        method: 'POST',
+        body: {
+            attemptId,
+            quizId: recordingQuizId || 'quiz',
+            index,
+            contentType,
+            dataBase64
+        }
+    });
+
+    const chunk = response?.chunk || {};
+    return markRecordingChunkUploaded({
+        attemptId,
+        index,
+        path: chunk.path || `${recordingBasePath}/chunks/chunk_${String(index).padStart(4, '0')}.webm`,
+        downloadURL: '',
+        size: Number(chunk.size || blob.size || 0),
+        contentType: chunk.contentType || contentType,
+        uploadedVia: chunk.localOnly ? 'local_backend' : 'backend'
+    });
 }
 
 async function uploadRecordingChunkWithRetry(blob, index) {
@@ -1046,22 +1929,44 @@ async function uploadRecordingChunkWithRetry(blob, index) {
         }
     }
 
+    try {
+        console.warn(`Recording chunk ${index} blob upload failed; trying base64 Storage upload.`, lastError);
+        return await uploadRecordingChunkStringOnce(blob, index);
+    } catch (base64Error) {
+        lastError = base64Error;
+        console.warn(`Recording chunk ${index} base64 Storage upload failed`, base64Error);
+    }
+
+    try {
+        console.warn(`Recording chunk ${index} direct Storage upload failed; trying backend fallback.`, lastError);
+        return await uploadRecordingChunkViaBackend(blob, index);
+    } catch (fallbackError) {
+        lastError = fallbackError;
+        console.warn(`Recording chunk ${index} backend fallback failed`, fallbackError);
+    }
+
     recordingFailedChunkCount++;
+    recordingLastUploadError = getFirebaseStorageErrorMessage(lastError);
     await getRecordingChunkDocRef(currentRecordingAttemptId, index).set({
         index,
         size: blob?.size || 0,
         status: 'failed',
         failedAt: firebase.firestore.FieldValue.serverTimestamp(),
         error: String(lastError?.message || lastError || 'Upload failed')
-    }, { merge: true });
+    }, { merge: true }).catch((error) => {
+        console.warn('Could not save failed recording chunk metadata:', error);
+    });
     await getRecordingDocRef().set({
         failedChunkCount: recordingFailedChunkCount,
+        lastUploadError: recordingLastUploadError,
         updatedAt: firebase.firestore.FieldValue.serverTimestamp()
-    }, { merge: true });
+    }, { merge: true }).catch((error) => {
+        console.warn('Could not update failed recording chunk count:', error);
+    });
     console.warn('Recording chunk upload failed after retries', { index, error: lastError });
     updateRecordingUi({
         status: 'Recording in progress',
-        warning: `Chunk ${index} upload failed after retries. The quiz can continue.`
+        warning: `Chunk ${index} upload failed after retries. ${recordingLastUploadError}`
     });
     return null;
 }
@@ -1120,7 +2025,13 @@ async function initCamera() {
                 height: { ideal: 480 },
                 frameRate: { ideal: 15, max: 15 }
             },
-            audio: true
+            audio: {
+                echoCancellation: false,
+                noiseSuppression: false,
+                autoGainControl: true,
+                channelCount: 1,
+                sampleRate: 48000
+            }
         });
 
         const preview = document.getElementById('webcam-preview');
@@ -1131,7 +2042,24 @@ async function initCamera() {
         }
 
         updateRecordingUi({
-            status: 'Camera ready',
+            status: 'Checking microphone',
+            progress: 'Speak once near your microphone',
+            warning: ''
+        });
+        const microphoneCheck = await verifyMicrophoneSignal(quizMediaStream);
+        if (!microphoneCheck.ok) {
+            updateRecordingUi({
+                status: 'Microphone not recording',
+                progress: 'Upload pending',
+                warning: microphoneCheck.message
+            });
+            alert(microphoneCheck.message);
+            stopCamera();
+            return false;
+        }
+
+        updateRecordingUi({
+            status: 'Camera and microphone ready',
             progress: 'Upload pending',
             warning: ''
         });
@@ -1171,6 +2099,7 @@ async function startRecording() {
         recordingUploadedChunkCount = 0;
         recordingFailedChunkCount = 0;
         recordingPendingUploads = new Set();
+        recordingLastUploadError = '';
         await createRecordingMetadataDocument();
         const mimeType = getSupportedRecordingMimeType();
         mediaRecorder = mimeType
@@ -1223,8 +2152,25 @@ function stopRecording() {
         }
 
         const recorder = mediaRecorder;
+        let finished = false;
+        const finalDataPromise = recorder.state === 'inactive'
+            ? Promise.resolve()
+            : new Promise((finalResolve) => {
+                let settled = false;
+                const settle = () => {
+                    if (settled) return;
+                    settled = true;
+                    finalResolve();
+                };
+                recorder.addEventListener('dataavailable', settle, { once: true });
+                setTimeout(settle, 1500);
+            });
         const finish = async () => {
+            if (finished) return;
+            finished = true;
             mediaRecorder = null;
+            await finalDataPromise;
+            await new Promise((finalResolve) => setTimeout(finalResolve, 0));
             await waitForRecordingChunkUploads();
             const hasRecording = recordingUploadedChunkCount > 0 || recordingChunkIndex > 0;
             if (currentRecordingAttemptId) {
@@ -1233,16 +2179,22 @@ function stopRecording() {
                     endedAt: firebase.firestore.FieldValue.serverTimestamp(),
                     chunkCount: recordingUploadedChunkCount,
                     failedChunkCount: recordingFailedChunkCount,
+                    lastUploadError: recordingLastUploadError || '',
                     updatedAt: firebase.firestore.FieldValue.serverTimestamp()
                 }, { merge: true }).catch((error) => {
                     console.warn('Could not mark recording complete:', error);
                 });
             }
             updateRecordingUi({
-                status: hasRecording ? 'Recording upload complete' : 'No recording captured',
+                status: hasRecording
+                    ? (recordingFailedChunkCount > 0 ? 'Recording upload incomplete' : 'Recording upload complete')
+                    : 'No recording captured',
                 progress: hasRecording
                     ? `Uploaded ${recordingUploadedChunkCount} chunk${recordingUploadedChunkCount === 1 ? '' : 's'}`
-                    : 'Upload skipped'
+                    : 'Upload skipped',
+                warning: recordingFailedChunkCount > 0
+                    ? `${recordingFailedChunkCount} chunk${recordingFailedChunkCount === 1 ? '' : 's'} failed. ${recordingLastUploadError}`
+                    : ''
             });
             resolve(hasRecording ? {
                 attemptId: currentRecordingAttemptId,
@@ -1389,7 +2341,7 @@ async function updateRecordingMetadataFromAttempt(attempt = {}) {
             partNumber: Number(attempt.partNumber || currentPartNumber || 0),
             partLabel: attempt.partLabel || currentPartLabel || '',
             userName: attempt.userName || currentUser?.name || 'Student',
-            userAvatar: attempt.userAvatar || currentUser?.avatar || 'ST',
+            userAvatar: getDisplayAvatar(attempt.userAvatar || currentUser?.avatar),
             attemptClientId: attempt.clientAttemptId || '',
             updatedAt: firebase.firestore.FieldValue.serverTimestamp()
         }, { merge: true });
@@ -1450,6 +2402,28 @@ function getSafeRecordingUrl(url) {
             || parsed.hostname.endsWith('.firebasestorage.app');
 
         return parsed.protocol === 'https:' && isFirebaseStorageHost ? parsed.href : '';
+    } catch (error) {
+        return '';
+    }
+}
+
+function canUseLocalRecordingApi() {
+    const mode = String(backendConfig.mode || '').trim().toLowerCase();
+    return ['localhost', '127.0.0.1'].includes(window.location.hostname)
+        && mode === 'local'
+        && BACKEND_API_BASE_URL.startsWith(window.location.origin);
+}
+
+function getSafeLocalRecordingUrl(url) {
+    const raw = String(url || '').trim();
+    if (!raw || !canUseLocalRecordingApi()) return '';
+
+    try {
+        const parsed = new URL(raw, window.location.origin);
+        return parsed.origin === window.location.origin
+            && parsed.pathname.startsWith('/.local-recordings/')
+            ? parsed.href
+            : '';
     } catch (error) {
         return '';
     }
@@ -1561,6 +2535,35 @@ async function getAvailableAdminRecordingAttempts() {
     return attemptsWithUrls.filter((attempt, index) => availability[index]);
 }
 
+async function hydrateLocalRecordingChunks(recording = {}) {
+    if (!canUseLocalRecordingApi()) return recording;
+    if (Array.isArray(recording.chunks) && recording.chunks.length > 0) return recording;
+
+    const attemptId = String(recording.attemptId || recording.id || '').trim();
+    if (!attemptId) return recording;
+
+    try {
+        const params = new URLSearchParams({
+            attemptId,
+            studentId: String(recording.studentId || ''),
+            quizId: String(recording.quizId || '')
+        });
+        const response = await callBackend(`/api/recordings/chunks?${params.toString()}`);
+        const chunks = Array.isArray(response.chunks) ? response.chunks : [];
+        if (!chunks.length) return recording;
+
+        return {
+            ...recording,
+            chunks: chunks.filter((chunk) => chunk.status !== 'failed'),
+            failedChunks: chunks.filter((chunk) => chunk.status === 'failed'),
+            localOnlyChunks: true
+        };
+    } catch (error) {
+        console.warn('Could not load local recording chunks:', error);
+        return recording;
+    }
+}
+
 async function getAdminRecordingDocuments() {
     if (!db) return [];
 
@@ -1582,7 +2585,7 @@ async function getAdminRecordingDocuments() {
         recording.failedChunks = chunksSnapshot.docs
             .map((chunkDoc) => ({ id: chunkDoc.id, ...chunkDoc.data() }))
             .filter((chunk) => chunk.status === 'failed');
-        return recording;
+        return hydrateLocalRecordingChunks(recording);
     }));
 
     const availability = await Promise.all(
@@ -1597,6 +2600,32 @@ function getCallableFunctionsService() {
         throw new Error('Firebase Functions SDK is not loaded. Hard refresh and check index.html includes firebase-functions-compat.js.');
     }
     return firebaseApp.functions('us-central1');
+}
+
+async function mergeLocalAdminRecording(attemptId, force = false) {
+    if (!canUseLocalRecordingApi()) return null;
+
+    const response = await callBackend('/api/recordings/merge', {
+        method: 'POST',
+        body: {
+            attemptId,
+            force: Boolean(force)
+        }
+    });
+
+    const finalUrl = getSafeLocalRecordingUrl(response?.finalVideoUrl);
+    if (!finalUrl) return null;
+
+    adminLocalMergedRecordingUrls.set(attemptId, finalUrl);
+    adminRecordingAvailabilityCache.clear();
+    adminAutoMergeAttemptIds.delete(attemptId);
+    adminAutoMergeFailedAttemptIds.delete(attemptId);
+    adminAutoMergeErrorMessages.delete(attemptId);
+    return {
+        finalVideoUrl: finalUrl,
+        finalVideoPath: response.finalVideoPath || '',
+        localOnly: Boolean(response.localOnly)
+    };
 }
 
 async function mergeAdminRecording(attemptId, force = false) {
@@ -1622,6 +2651,13 @@ async function mergeAdminRecording(attemptId, force = false) {
     adminAutoMergeAttemptIds.add(safeAttemptId);
 
     try {
+        const localMergeResult = await mergeLocalAdminRecording(safeAttemptId, force);
+        if (localMergeResult?.finalVideoUrl) {
+            showPointsNotification('Local recording merged successfully.', 'points-added');
+            renderAdminDashboard();
+            return;
+        }
+
         const mergeFn = getCallableFunctionsService().httpsCallable('mergeRecordingChunks');
         const result = await mergeFn({ attemptId: safeAttemptId, force: Boolean(force) });
         adminRecordingAvailabilityCache.clear();
@@ -1698,9 +2734,11 @@ function hasCompleteAdminRecordingChunks(recording = {}) {
 function isAdminRecordingReadyForAutoMerge(recording = {}) {
     const attemptId = String(recording.attemptId || recording.id || '').trim();
     return Boolean(currentUser?.isAdmin)
+        && !adminLocalMergedRecordingUrls.has(attemptId)
         && !adminAutoMergeFailedAttemptIds.has(attemptId)
         && String(recording.status || '').toLowerCase() === 'completed'
         && !getSafeRecordingUrl(recording.finalVideoUrl)
+        && !getSafeLocalRecordingUrl(recording.localFinalVideoUrl)
         && getAdminRecordingUploadedChunkCount(recording) > 0
         && getAdminRecordingFailedChunkCount(recording) === 0
         && hasCompleteAdminRecordingChunks(recording);
@@ -1710,7 +2748,9 @@ function scheduleAdminRecordingAutoRefresh() {
     if (adminRecordingAutoRefreshTimer) return;
     adminRecordingAutoRefreshTimer = setTimeout(() => {
         adminRecordingAutoRefreshTimer = null;
-        if (adminPanelVisible) renderAdminDashboard();
+        const activeVideo = document.querySelector('.admin-recording-video');
+        const isVideoPlaying = activeVideo && !activeVideo.paused && !activeVideo.ended;
+        if (adminPanelVisible && !isVideoPlaying) renderAdminDashboard();
     }, 4000);
 }
 
@@ -1729,13 +2769,19 @@ function queueAdminRecordingAutoMerge(recording = {}) {
 
     (async () => {
         try {
+            const localMergeResult = await mergeLocalAdminRecording(attemptId);
+            if (localMergeResult?.finalVideoUrl) {
+                renderAdminDashboard();
+                return;
+            }
+
             const mergeFn = getCallableFunctionsService().httpsCallable('mergeRecordingChunks');
             await mergeFn({ attemptId });
             adminRecordingAvailabilityCache.clear();
             adminAutoMergeAttemptIds.delete(attemptId);
             adminAutoMergeFailedAttemptIds.delete(attemptId);
             adminAutoMergeErrorMessages.delete(attemptId);
-            scheduleAdminRecordingAutoRefresh();
+            renderAdminDashboard();
         } catch (error) {
             console.error('Automatic admin recording merge failed:', error);
             adminAutoMergeAttemptIds.delete(attemptId);
@@ -1746,7 +2792,7 @@ function queueAdminRecordingAutoMerge(recording = {}) {
                 statusEl.textContent = message;
                 statusEl.className = 'auth-status error';
             }
-            scheduleAdminRecordingAutoRefresh();
+            renderAdminDashboard();
         }
     })();
 }
@@ -1787,7 +2833,7 @@ function getAttemptPartLabel(attempt = {}) {
     if (partLabel) return partLabel;
 
     const partNumber = Number(attempt.partNumber || 0);
-    return partNumber ? `Part ${partNumber}` : 'Chapter attempt';
+    return partNumber ? `Quiz ${partNumber}` : 'Chapter quiz';
 }
 
 function getAttemptPartKey(attempt = {}) {
@@ -1815,7 +2861,7 @@ function getAdminRecordingGroups(recordingAttempts = adminAttempts, options = {}
             groupsByUser.set(userId, {
                 id: userId,
                 name: userMeta.name || attempt.userName || 'Student',
-                avatar: userMeta.avatar || attempt.userAvatar || DISPLAY_AVATARS[0],
+                avatar: getDisplayAvatar(userMeta.avatar || attempt.userAvatar),
                 chapters: new Map(),
                 recordingCount: 0
             });
@@ -1934,10 +2980,10 @@ function normalizeRecordingDocumentForAdminGroup(recording = {}) {
         recordingAttemptId: attemptId,
         userId: recording.studentId || matchedAttempt.userId || '',
         userName: recording.userName || matchedAttempt.userName || 'Student',
-        userAvatar: recording.userAvatar || matchedAttempt.userAvatar || DISPLAY_AVATARS[0],
+        userAvatar: getDisplayAvatar(recording.userAvatar || matchedAttempt.userAvatar || DISPLAY_AVATARS[0]),
         chapter: recording.chapter || matchedAttempt.chapter || getRecordingChapterFallback(recording),
         partNumber,
-        partLabel: recording.partLabel || matchedAttempt.partLabel || (partNumber ? `Part ${partNumber}` : 'Chapter attempt'),
+        partLabel: recording.partLabel || matchedAttempt.partLabel || (partNumber ? `Quiz ${partNumber}` : 'Chapter quiz'),
         timestamp: getTimestampMs(recording.startedAt, Number(matchedAttempt.timestamp || Date.now())),
         score: Number(matchedAttempt.score || 0),
         total: Number(matchedAttempt.total || 0),
@@ -1950,8 +2996,10 @@ function normalizeRecordingDocumentForAdminGroup(recording = {}) {
 
 function renderAdminRecordingItemCard(recording) {
     const recordingDoc = recording.recordingDoc || null;
-    const finalUrl = getSafeRecordingUrl(recording.recordingUrl || recordingDoc?.finalVideoUrl);
     const attemptId = String(recording.recordingAttemptId || recordingDoc?.attemptId || recordingDoc?.id || '').trim();
+    const finalUrl = getSafeLocalRecordingUrl(adminLocalMergedRecordingUrls.get(attemptId))
+        || getSafeRecordingUrl(recording.recordingUrl || recordingDoc?.finalVideoUrl)
+        || getSafeLocalRecordingUrl(recording.localFinalVideoUrl || recordingDoc?.localFinalVideoUrl);
     const uploadedChunkCount = recordingDoc ? getAdminRecordingUploadedChunkCount(recordingDoc) : 0;
     const failedChunkCount = recordingDoc ? getAdminRecordingFailedChunkCount(recordingDoc) : 0;
     const status = String(recordingDoc?.status || recording.recordingStatus || (finalUrl ? 'merged' : 'unknown')).toLowerCase();
@@ -1971,7 +3019,7 @@ function renderAdminRecordingItemCard(recording) {
     return `
         <article class="admin-recording-card">
             ${finalUrl ? `
-                <video class="admin-recording-video" controls preload="metadata" src="${escapeHtml(finalUrl)}"></video>
+                <video class="admin-recording-video" controls preload="auto" src="${escapeHtml(finalUrl)}"></video>
             ` : `
                 <div class="admin-recording-meta admin-recording-state">
                     <strong>Full recording not ready</strong>
@@ -2013,7 +3061,7 @@ function renderAdminRecordingGroups(recordingGroups = []) {
             <details class="admin-recording-user">
                 <summary>
                     <span class="admin-recording-user-main">
-                        <span class="lb-avatar">${escapeHtml(group.avatar || DISPLAY_AVATARS[0])}</span>
+                        <span class="lb-avatar">${escapeHtml(getDisplayAvatar(group.avatar))}</span>
                         <span>
                             <strong>${escapeHtml(group.name || 'Student')}</strong>
                             <small>${escapeHtml(group.id.slice(0, 16) || 'No UID')} | ${chapterLabel}</small>
@@ -2132,6 +3180,24 @@ function buildChapterHistoryFromAttempts(attempts) {
     return nextHistory;
 }
 
+function hasAttemptedQuizPart(chapter, partNumber) {
+    const safeChapter = String(chapter || '');
+    const safePartNumber = Number(partNumber || 1);
+    const pending = getPendingOfflineAttempt();
+    if (
+        pending
+        && String(pending.attempt?.chapter || '') === safeChapter
+        && Number(pending.attempt?.partNumber || 1) === safePartNumber
+    ) {
+        return true;
+    }
+
+    return testHistory.some((attempt) => (
+        String(attempt.chapter || '') === safeChapter
+        && Number(attempt.partNumber || 1) === safePartNumber
+    ));
+}
+
 function getAttemptUserIdFromSnapshot(docSnapshot, data = {}) {
     return data.userId
         || docSnapshot?.ref?.parent?.parent?.id
@@ -2176,7 +3242,7 @@ async function loadAdminAttemptsByUser(usersSnapshot, userMetaById) {
 }
 
 async function ensureUserProfile(authUser) {
-    const seed = pendingProfileSeed || {};
+    const seed = pendingProfileSeed || getStoredAuthProfileSeed() || {};
 
     if (isBackendEnabled()) {
         try {
@@ -2184,8 +3250,14 @@ async function ensureUserProfile(authUser) {
                 method: 'POST',
                 body: seed
             });
-            pendingProfileSeed = null;
-            return response.profile;
+            clearPendingAuthProfileSeed();
+            if (response.profile?.referralApplied) {
+                pendingReferralSuccessMessage = response.profile.referralReward?.message || 'Referral code applied successfully.';
+            }
+            return {
+                ...(response.profile || {}),
+                avatar: getDisplayAvatar(response.profile?.avatar || seed.avatar)
+            };
         } catch (error) {
             if (!canUseClientFirestoreFallback()) throw error;
             console.warn('Backend profile load failed; falling back to Firestore client profile.', error);
@@ -2201,7 +3273,7 @@ async function ensureUserProfile(authUser) {
     const profile = {
         uid: authUser.uid,
         name: existing.name || getDefaultDisplayName(authUser, seed.name),
-        avatar: existing.avatar || seed.avatar || DISPLAY_AVATARS[0],
+        avatar: getDisplayAvatar(existing.avatar || seed.avatar || DISPLAY_AVATARS[0]),
         totalPoints: Number(existing.totalPoints || 0),
         testsCompleted: Number(existing.testsCompleted || 0),
         totalTimeSpent: Number(existing.totalTimeSpent || 0),
@@ -2216,14 +3288,18 @@ async function ensureUserProfile(authUser) {
     }
 
     await userRef.set(profile, { merge: true });
-    pendingProfileSeed = null;
+    clearPendingAuthProfileSeed();
 
     return {
         uid: authUser.uid,
         name: profile.name,
-        avatar: profile.avatar,
+        avatar: getDisplayAvatar(profile.avatar),
         email: authUser.email || '',
-        isAdmin: isAdminEmail(authUser.email)
+        isAdmin: isAdminEmail(authUser.email),
+        referralCode: normalizeReferralCode(profile.referralCode),
+        referredBy: String(profile.referredBy || ''),
+        totalReferrals: getNumericValue(profile.totalReferrals ?? profile.numberOfReferrals ?? profile.noOfReferrals),
+        referralPoints: getNumericValue(profile.referralPoints)
     };
 }
 
@@ -2254,7 +3330,7 @@ async function refreshLeaderboardFromCloud(options = {}) {
 
     const snapshot = await db.collection('users')
         .orderBy('totalPoints', 'desc')
-        .limit(10)
+        .limit(MAX_LEADERBOARD_USERS)
         .get();
 
     leaderboard = snapshot.docs.map((docSnapshot) => ({
@@ -2273,6 +3349,9 @@ async function loadCloudData() {
             applyCloudProfile(response.profile);
             leaderboard = Array.isArray(response.leaderboard) ? response.leaderboard : [];
             leaderboardFetchedAt = Date.now();
+            referralHistory = Array.isArray(response.referralHistory)
+                ? response.referralHistory.map((entry) => normalizeReferralRecord(entry))
+                : [];
             testHistory = Array.isArray(response.attempts)
                 ? response.attempts.map((attempt) => normalizeAttemptData(attempt, currentUser))
                 : [];
@@ -2323,7 +3402,34 @@ function normalizeWithdrawalRequest(raw = {}) {
         status: WITHDRAWAL_STATUSES.includes(String(raw.status || 'Pending')) ? String(raw.status || 'Pending') : 'Pending',
         requestDateTime: getTimestampMs(raw.requestDateTime || raw.requestedAtMs || raw.requestedAt, Date.now()),
         updatedAtMs: getTimestampMs(raw.updatedAtMs || raw.updatedAt, 0),
-        updatedBy: String(raw.updatedBy || '')
+        updatedBy: String(raw.updatedBy || ''),
+        walletDeducted: Boolean(raw.walletDeducted),
+        deductedPoints: getNumericValue(raw.deductedPoints),
+        deductedAtMs: getTimestampMs(raw.deductedAtMs || raw.deductedAt, 0),
+        refundedPoints: getNumericValue(raw.refundedPoints),
+        refundedAtMs: getTimestampMs(raw.refundedAtMs || raw.refundedAt, 0)
+    };
+}
+
+function normalizeReferralRecord(raw = {}) {
+    return {
+        id: String(raw.id || ''),
+        referrerUserId: String(raw.referrerUserId || ''),
+        referrerEmail: String(raw.referrerEmail || ''),
+        referrerName: String(raw.referrerName || 'Student'),
+        referredUserId: String(raw.referredUserId || ''),
+        referredEmail: String(raw.referredEmail || ''),
+        referredName: String(raw.referredName || 'Student'),
+        referralCode: normalizeReferralCode(raw.referralCode),
+        status: String(raw.status || 'completed'),
+        rewardPoints: getNumericValue(raw.rewardPoints, REFERRAL_REWARD_POINTS),
+        createdAtMs: getTimestampMs(raw.createdAtMs || raw.createdAt, Date.now()),
+        updatedAtMs: getTimestampMs(raw.updatedAtMs || raw.updatedAt, 0),
+        cancelledAtMs: getTimestampMs(raw.cancelledAtMs || raw.cancelledAt, 0),
+        cancelledBy: String(raw.cancelledBy || ''),
+        suspicious: Boolean(raw.suspicious),
+        suspiciousReason: String(raw.suspiciousReason || ''),
+        clientInfo: raw.clientInfo && typeof raw.clientInfo === 'object' ? raw.clientInfo : {}
     };
 }
 
@@ -2501,6 +3607,9 @@ async function loadAdminDashboardData() {
             adminWithdrawalRequests = Array.isArray(response.withdrawalRequests)
                 ? response.withdrawalRequests.map((request) => normalizeWithdrawalRequest(request))
                 : [];
+            adminReferrals = Array.isArray(response.referrals)
+                ? response.referrals.map((entry) => normalizeReferralRecord(entry))
+                : [];
             adminLoadError = '';
             renderAdminDashboard();
             return;
@@ -2527,7 +3636,7 @@ async function loadAdminDashboardData() {
     const userMetaById = new Map(adminUsers.map((user) => [user.id, {
         uid: user.id,
         name: user.name || 'Student',
-        avatar: user.avatar || DISPLAY_AVATARS[0]
+        avatar: getDisplayAvatar(user.avatar || DISPLAY_AVATARS[0])
     }]));
 
     try {
@@ -2549,6 +3658,20 @@ async function loadAdminDashboardData() {
     } catch (error) {
         console.warn('Withdrawal request load failed:', error);
         adminWithdrawalRequests = [];
+    }
+
+    try {
+        const referralSnapshot = await db.collection('referrals')
+            .orderBy('createdAtMs', 'desc')
+            .limit(200)
+            .get();
+        adminReferrals = referralSnapshot.docs.map((docSnapshot) => normalizeReferralRecord({
+            id: docSnapshot.id,
+            ...docSnapshot.data()
+        }));
+    } catch (error) {
+        console.warn('Referral record load failed:', error);
+        adminReferrals = [];
     }
 
     adminLoadError = '';
@@ -2616,6 +3739,7 @@ function renderAdminWithdrawalRequests(container) {
                     <div><span>Requested points</span>${formatPointAmount(request.requestedPoints)} points</div>
                     <div><span>Request date/time</span>${formatDateTime(request.requestDateTime)}</div>
                     <div><span>Updated by</span>${escapeHtml(request.updatedBy || 'Not updated yet')}</div>
+                    <div><span>Wallet deduction</span>${request.walletDeducted ? `${formatPointAmount(request.deductedPoints)} points deducted` : 'Not deducted'}</div>
                 </div>
                 <div class="admin-withdrawal-actions">
                     <select class="withdraw-status-select" onchange="updateWithdrawalRequestStatus('${safeId}', this.value)" ${isUpdating ? 'disabled' : ''}>
@@ -2625,6 +3749,110 @@ function renderAdminWithdrawalRequests(container) {
             </div>
         `;
     }).join('');
+}
+
+function renderAdminReferralRecords(container) {
+    if (!container) return;
+
+    if (!adminReferrals.length) {
+        container.innerHTML = '<div class="admin-empty">No referral records yet.</div>';
+        return;
+    }
+
+    container.innerHTML = adminReferrals.map((referral) => {
+        const safeId = escapeHtml(referral.id);
+        const isCancelled = referral.status === 'cancelled';
+        const isUpdating = updatingReferralRecordIds.has(referral.id);
+        const flagClass = isCancelled || referral.suspicious ? 'danger' : 'success';
+        const flagLabel = isCancelled ? 'cancelled' : (referral.suspicious ? 'suspicious' : referral.status);
+        const clientInfo = referral.clientInfo || {};
+
+        return `
+            <div class="admin-attempt-card ${referral.suspicious ? 'flagged' : ''}">
+                <div class="admin-attempt-head">
+                    <div>
+                        <strong>${escapeHtml(referral.referrerEmail || referral.referrerName || referral.referrerUserId || 'Referrer')}</strong>
+                        <div class="admin-meta">Referrer: ${escapeHtml(referral.referrerUserId || 'Unknown')}</div>
+                    </div>
+                    <div class="admin-attempt-score">
+                        <span class="admin-chip ${flagClass}">${escapeHtml(flagLabel)}</span>
+                        <strong>${formatPointAmount(referral.rewardPoints)} points</strong>
+                    </div>
+                </div>
+                <div class="admin-withdrawal-grid">
+                    <div><span>Referred user</span>${escapeHtml(referral.referredEmail || referral.referredUserId || 'Unknown')}</div>
+                    <div><span>Referred UID</span>${escapeHtml(referral.referredUserId || 'Unknown')}</div>
+                    <div><span>Referral code</span>${escapeHtml(referral.referralCode || 'Missing')}</div>
+                    <div><span>Date</span>${formatDateTime(referral.createdAtMs)}</div>
+                    <div><span>Device</span>${escapeHtml(clientInfo.platform || 'Unknown')}</div>
+                    <div><span>IP/User agent</span>${escapeHtml(clientInfo.ip || clientInfo.userAgent || 'Not captured')}</div>
+                </div>
+                ${referral.suspiciousReason ? `<div class="admin-meta">Review note: ${escapeHtml(referral.suspiciousReason)}</div>` : ''}
+                <div class="admin-withdrawal-actions">
+                    <button class="btn btn-danger btn-sm" onclick="cancelReferralBonus('${safeId}')" type="button" ${isCancelled || isUpdating ? 'disabled' : ''}>
+                        <i class="fas fa-ban"></i> ${isUpdating ? 'Cancelling...' : 'Cancel Bonus'}
+                    </button>
+                </div>
+            </div>
+        `;
+    }).join('');
+}
+
+async function cancelReferralBonus(referralId) {
+    if (!currentUser?.isAdmin) {
+        showPointsNotification('Admin access required to cancel referral bonuses.', 'points-lost');
+        return;
+    }
+
+    const safeReferralId = String(referralId || '').trim();
+    if (!safeReferralId) return;
+
+    updatingReferralRecordIds.add(safeReferralId);
+    renderAdminDashboard();
+
+    try {
+        const response = await callBackend(`/api/admin/referrals/${encodeURIComponent(safeReferralId)}/status`, {
+            method: 'PATCH',
+            body: {
+                status: 'cancelled',
+                suspiciousReason: 'Cancelled by admin review'
+            }
+        });
+        const updated = normalizeReferralRecord(response.referral || {});
+        adminReferrals = adminReferrals.map((entry) => (
+            entry.id === safeReferralId ? updated : entry
+        ));
+        if (response.user && response.user.id) {
+            adminUsers = adminUsers.map((user) => (
+                (user.id || user.uid) === response.user.id
+                    ? {
+                        ...user,
+                        totalPoints: getNumericValue(response.user.totalPoints, user.totalPoints),
+                        points: getNumericValue(response.user.points, user.points),
+                        totalReferrals: getNumericValue(response.user.totalReferrals ?? response.user.numberOfReferrals ?? response.user.noOfReferrals, user.totalReferrals),
+                        referralPoints: getNumericValue(response.user.referralPoints, user.referralPoints)
+                    }
+                    : user
+            ));
+            if (currentUser?.uid === response.user.id) {
+                totalPoints = getNumericValue(response.user.totalPoints, totalPoints);
+                currentUser = {
+                    ...currentUser,
+                    totalReferrals: getNumericValue(response.user.totalReferrals ?? response.user.numberOfReferrals ?? response.user.noOfReferrals, currentUser.totalReferrals),
+                    referralPoints: getNumericValue(response.user.referralPoints, currentUser.referralPoints)
+                };
+                updateWallet();
+                updateDashboard();
+            }
+        }
+        showPointsNotification('Referral bonus cancelled by admin review.', 'points-lost');
+    } catch (error) {
+        console.error('Failed to cancel referral bonus:', error);
+        showPointsNotification(error.message || 'Could not cancel referral bonus.', 'points-lost');
+    } finally {
+        updatingReferralRecordIds.delete(safeReferralId);
+        renderAdminDashboard();
+    }
 }
 
 async function updateWithdrawalRequestStatus(requestId, status) {
@@ -2649,6 +3877,19 @@ async function updateWithdrawalRequestStatus(requestId, status) {
         adminWithdrawalRequests = adminWithdrawalRequests.map((request) => (
             request.id === safeRequestId ? updated : request
         ));
+        if (response.user && response.user.id) {
+            adminUsers = adminUsers.map((user) => (
+                (user.id || user.uid) === response.user.id
+                    ? { ...user, totalPoints: getNumericValue(response.user.totalPoints, user.totalPoints) }
+                    : user
+            ));
+            if (currentUser?.uid === response.user.id) {
+                totalPoints = getNumericValue(response.user.totalPoints, totalPoints);
+                updateWallet();
+                updateDashboard();
+            }
+            renderLeaderboard();
+        }
         showPointsNotification(`Withdrawal status updated to ${safeStatus}.`, 'points-added');
     } catch (error) {
         console.error('Failed to update withdrawal status:', error);
@@ -2667,6 +3908,7 @@ function renderAdminDashboard() {
     const usersList = document.getElementById('admin-users-list');
     const recordingsList = document.getElementById('admin-recordings-list');
     const withdrawalsList = document.getElementById('admin-withdrawal-requests-list');
+    const referralsList = document.getElementById('admin-referrals-list');
     const leaderboardList = document.getElementById('admin-leaderboard-list');
     const attemptsList = document.getElementById('admin-attempts-list');
 
@@ -2694,13 +3936,13 @@ function renderAdminDashboard() {
         if (adminLoadError) {
             statusEl.textContent = adminLoadError;
             statusEl.className = 'auth-status error';
-        } else if (adminUsers.length === 0 && adminAttempts.length === 0 && adminWithdrawalRequests.length === 0) {
+        } else if (adminUsers.length === 0 && adminAttempts.length === 0 && adminWithdrawalRequests.length === 0 && adminReferrals.length === 0) {
             statusEl.textContent = 'Loading admin dashboard data...';
             statusEl.className = 'auth-status';
         } else {
             const recordingCount = adminAttempts.filter((attempt) => getSafeRecordingUrl(attempt.recordingUrl)).length;
             const pendingWithdrawals = adminWithdrawalRequests.filter((request) => request.status === 'Pending').length;
-            statusEl.textContent = `${adminUsers.length} users loaded | ${adminAttempts.length} attempt records loaded | ${recordingCount} recordings | ${pendingWithdrawals} pending withdrawals`;
+            statusEl.textContent = `${adminUsers.length} users loaded | ${adminAttempts.length} attempt records loaded | ${recordingCount} recordings | ${pendingWithdrawals} pending withdrawals | ${adminReferrals.length} referrals`;
             statusEl.className = 'auth-status success';
         }
     }
@@ -2709,6 +3951,7 @@ function renderAdminDashboard() {
         const suspiciousAttempts = adminAttempts.filter((attempt) => attempt.cheatLog.flagged).length;
         const highestTabSwitches = adminAttempts.reduce((max, attempt) => Math.max(max, attempt.cheatLog.tabSwitchCount), 0);
         const pendingWithdrawals = adminWithdrawalRequests.filter((request) => request.status === 'Pending').length;
+        const completedReferrals = adminReferrals.filter((referral) => referral.status === 'completed').length;
         summaryGrid.innerHTML = `
             <div class="stat-card">
                 <div class="stat-number">${adminUsers.length}</div>
@@ -2730,6 +3973,10 @@ function renderAdminDashboard() {
                 <div class="stat-number">${pendingWithdrawals}</div>
                 <div>Pending Withdrawals</div>
             </div>
+            <div class="stat-card">
+                <div class="stat-number">${completedReferrals}</div>
+                <div>Completed Referrals</div>
+            </div>
         `;
     }
 
@@ -2740,7 +3987,7 @@ function renderAdminDashboard() {
             usersList.className = 'admin-user-list';
             usersList.innerHTML = adminUsers.map((user) => `
                 <div class="leaderboard-item">
-                    <div class="lb-avatar">${escapeHtml(user.avatar || DISPLAY_AVATARS[0])}</div>
+                    <div class="lb-avatar">${escapeHtml(getDisplayAvatar(user.avatar))}</div>
                     <div class="lb-info">
                         <strong>${escapeHtml(user.name || 'Student')}</strong>
                         <span>${escapeHtml((user.uid || user.id || '').slice(0, 12) || 'No UID')} | ${Number(user.testsCompleted || 0)} tests</span>
@@ -2762,6 +4009,10 @@ function renderAdminDashboard() {
         renderAdminWithdrawalRequests(withdrawalsList);
     }
 
+    if (referralsList) {
+        renderAdminReferralRecords(referralsList);
+    }
+
     if (leaderboardList) {
         if (adminUsers.length === 0) {
             leaderboardList.innerHTML = '<div class="admin-empty">Leaderboard data will appear after users complete tests.</div>';
@@ -2771,7 +4022,7 @@ function renderAdminDashboard() {
             leaderboardList.innerHTML = adminUsers.slice(0, 10).map((user, index) => `
                 <div class="leaderboard-item rank-${index < 3 ? index + 1 : 'other'}">
                     <div class="lb-rank">${medals[index] || `#${index + 1}`}</div>
-                    <div class="lb-avatar">${escapeHtml(user.avatar || DISPLAY_AVATARS[0])}</div>
+                    <div class="lb-avatar">${escapeHtml(getDisplayAvatar(user.avatar))}</div>
                     <div class="lb-info">
                         <strong>${escapeHtml(user.name || 'Student')}</strong>
                         <span>${Number(user.testsCompleted || 0)} tests | ${formatTimeSpent(Number(user.totalTimeSpent || 0))}</span>
@@ -2800,8 +4051,8 @@ function renderAdminDashboard() {
                     <div class="admin-attempt-card ${attempt.cheatLog.flagged ? 'flagged' : ''}">
                         <div class="admin-attempt-head">
                             <div>
-                                <strong>${escapeHtml(attempt.userAvatar || DISPLAY_AVATARS[0])} ${escapeHtml(attempt.userName || 'Student')}</strong>
-                                <div class="admin-meta">${escapeHtml(attempt.chapter)} | ${formatDateTime(attempt.timestamp)}</div>
+                                <strong>${escapeHtml(getDisplayAvatar(attempt.userAvatar))} ${escapeHtml(attempt.userName || 'Student')}</strong>
+                                <div class="admin-meta">${escapeHtml(getChapterDisplayName(attempt.chapter))} | ${formatDateTime(attempt.timestamp)}</div>
                             </div>
                             <div class="admin-attempt-score">
                                 <span class="admin-chip ${flagClass}">${flagLabel}</span>
@@ -2834,6 +4085,7 @@ async function openHomeForAuthenticatedUser(authUser) {
         setAuthStatus('Loading your cloud profile...', 'success');
         currentUser = await ensureUserProfile(authUser);
         await loadCloudData();
+        restorePausedTestStateFromStorage();
         adminUsers = [];
         adminAttempts = [];
         adminWithdrawalRequests = [];
@@ -2841,6 +4093,11 @@ async function openHomeForAuthenticatedUser(authUser) {
         adminPanelVisible = Boolean(currentUser.isAdmin);
         resetAuthInputs();
         await showHomeScreen();
+        if (pendingReferralSuccessMessage) {
+            showPointsNotification(pendingReferralSuccessMessage, 'points-added');
+            pendingReferralSuccessMessage = '';
+        }
+        retryPendingOfflineAttempt();
         if (currentUser.isAdmin) {
             try {
                 await loadAdminDashboardData();
@@ -2852,6 +4109,7 @@ async function openHomeForAuthenticatedUser(authUser) {
         }
     } catch (error) {
         console.error('Failed to load authenticated user:', error);
+        clearPendingAuthProfileSeed();
         resetUserState();
         await auth.signOut().catch(() => {});
         showLoginScreen();
@@ -2866,7 +4124,7 @@ async function handleAuthStateChanged(authUser) {
         resetAuthInputs();
         showLoginScreen();
         if (firebaseReady && !document.getElementById('auth-status')?.textContent) {
-            setAuthStatus('Create an account or sign in with email to continue.');
+            setAuthStatus('Create an account, sign in with email, or continue with Google.');
         }
         return;
     }
@@ -2884,6 +4142,7 @@ function showLoginScreen() {
     document.getElementById('home').style.display = 'none';
     document.getElementById('quiz').style.display = 'none';
     document.getElementById('result').style.display = 'none';
+    hideReferralCard();
     setHomeSidebarButtonVisible(false);
 
     const grid = document.getElementById('avatar-grid');
@@ -2894,6 +4153,7 @@ function showLoginScreen() {
     // Select first by default
     const firstOption = grid.querySelector('.avatar-option');
     if (firstOption) { firstOption.classList.add('selected'); selectedAvatar = DISPLAY_AVATARS[0]; }
+    hydrateReferralCodeFromUrl();
 }
 
 function pickAvatar(el, avatar) {
@@ -2905,7 +4165,7 @@ function pickAvatar(el, avatar) {
 async function createAccount() {
     if (!ensureFirebaseReady()) return;
 
-    const { name, email, password } = getAuthFormValues();
+    const { name, email, password, referralCode } = getAuthFormValues();
     if (!name) {
         setAuthStatus('Please enter a display name for your account.', 'error');
         highlightField('username-input');
@@ -2922,7 +4182,21 @@ async function createAccount() {
         return;
     }
 
-    pendingProfileSeed = { name, avatar: selectedAvatar };
+    let validReferralCode = '';
+    try {
+        validReferralCode = await validateReferralCodeForSignup(referralCode);
+    } catch (error) {
+        setAuthStatus(error.message || 'Invalid referral code.', 'error');
+        highlightField('referral-input');
+        return;
+    }
+
+    setPendingAuthProfileSeed({
+        name,
+        avatar: selectedAvatar,
+        referralCode: validReferralCode,
+        clientInfo: getReferralClientInfo()
+    });
     setAuthStatus('Creating your account...', 'success');
 
     try {
@@ -2931,7 +4205,7 @@ async function createAccount() {
             await credential.user.updateProfile({ displayName: name });
         }
     } catch (error) {
-        pendingProfileSeed = null;
+        clearPendingAuthProfileSeed();
         setAuthStatus(formatFirebaseError(error), 'error');
     }
 }
@@ -2955,13 +4229,93 @@ async function signInWithEmail() {
         return;
     }
 
-    pendingProfileSeed = { name, avatar: selectedAvatar };
+    setPendingAuthProfileSeed({ name, avatar: selectedAvatar });
     setAuthStatus('Signing you in...', 'success');
 
     try {
         await auth.signInWithEmailAndPassword(email, password);
     } catch (error) {
-        pendingProfileSeed = null;
+        clearPendingAuthProfileSeed();
+        setAuthStatus(formatFirebaseError(error), 'error');
+    }
+}
+
+function createGoogleAuthProvider() {
+    if (!firebase?.auth?.GoogleAuthProvider) {
+        throw new Error('Google sign-in is not available. Make sure firebase-auth-compat.js is loaded.');
+    }
+
+    const provider = new firebase.auth.GoogleAuthProvider();
+    if (typeof provider.addScope === 'function') {
+        provider.addScope('email');
+        provider.addScope('profile');
+    }
+    if (typeof provider.setCustomParameters === 'function') {
+        provider.setCustomParameters({ prompt: 'select_account' });
+    }
+    return provider;
+}
+
+function shouldFallbackToGoogleRedirect(error) {
+    return [
+        'auth/popup-blocked',
+        'auth/operation-not-supported-in-this-environment'
+    ].includes(error?.code);
+}
+
+async function handleGoogleRedirectResult() {
+    if (!auth || typeof auth.getRedirectResult !== 'function') return;
+
+    try {
+        const result = await auth.getRedirectResult();
+        if (result?.user) {
+            setAuthStatus('Google sign-in complete. Loading your profile...', 'success');
+        }
+    } catch (error) {
+        clearPendingAuthProfileSeed();
+        setAuthStatus(formatFirebaseError(error), 'error');
+    }
+}
+
+async function signInWithGoogle() {
+    if (!ensureFirebaseReady()) return;
+
+    const { name, referralCode } = getAuthFormValues();
+    let validReferralCode = '';
+    try {
+        validReferralCode = await validateReferralCodeForSignup(referralCode);
+    } catch (error) {
+        setAuthStatus(error.message || 'Invalid referral code.', 'error');
+        highlightField('referral-input');
+        return;
+    }
+
+    const seed = {
+        name,
+        avatar: selectedAvatar,
+        referralCode: validReferralCode,
+        clientInfo: getReferralClientInfo()
+    };
+    setPendingAuthProfileSeed(seed, true);
+    setAuthStatus('Opening Google sign-in...', 'success');
+
+    try {
+        await auth.signInWithPopup(createGoogleAuthProvider());
+    } catch (error) {
+        if (shouldFallbackToGoogleRedirect(error) && typeof auth.signInWithRedirect === 'function') {
+            try {
+                setPendingAuthProfileSeed(seed, true);
+                setAuthStatus('Popup blocked. Redirecting to Google sign-in...', 'success');
+                await auth.signInWithRedirect(createGoogleAuthProvider());
+                return;
+            } catch (redirectError) {
+                clearPendingAuthProfileSeed();
+                setAuthStatus(formatFirebaseError(redirectError), 'error');
+                return;
+            }
+        }
+
+        clearPendingAuthProfileSeed();
         setAuthStatus(formatFirebaseError(error), 'error');
     }
 }
@@ -2992,11 +4346,12 @@ async function showHomeScreen() {
     document.getElementById('home').style.display = 'block';
     document.getElementById('quiz').style.display = 'none';
     document.getElementById('result').style.display = 'none';
+    hideReferralCard();
     setHomeSidebarButtonVisible(true);
 
-    document.getElementById('user-avatar-display').textContent = currentUser.avatar;
+    document.getElementById('user-avatar-display').textContent = getDisplayAvatar(currentUser.avatar);
     document.getElementById('user-name-display').textContent = currentUser.name;
-    document.getElementById('welcome-avatar').textContent = currentUser.avatar;
+    document.getElementById('welcome-avatar').textContent = getDisplayAvatar(currentUser.avatar);
     document.getElementById('welcome-name').textContent = `Welcome, ${currentUser.name}!`;
     updateHomeSidebarUser();
     const historySection = document.getElementById('history-section');
@@ -3006,6 +4361,7 @@ async function showHomeScreen() {
     const msgs = ['Ready to ace JEE today?', 'Keep up the great work!', 'Every question counts!', 'Sharpen your skills!'];
     document.getElementById('welcome-sub').textContent = msgs[Math.floor(Math.random() * msgs.length)];
 
+    selectedCourseId = '';
     generateChapterList();
     updateWallet();
     renderLeaderboard();
@@ -3033,7 +4389,7 @@ function isHomeSectionTabOpen() {
 }
 
 function updateHomeSidebarUser() {
-    const avatar = currentUser?.avatar || DISPLAY_AVATARS[0];
+    const avatar = getDisplayAvatar(currentUser?.avatar);
     const name = currentUser?.name || 'Student';
     const email = currentUser?.email || auth?.currentUser?.email || 'Signed in';
 
@@ -3090,7 +4446,8 @@ function getHomeSidebarSectionTitle(sectionId) {
         'contact-us': 'Contact Us',
         'about-us': 'About Us',
         'privacy-policy': 'Privacy Policy',
-        'terms-of-use': 'Terms of Use'
+        'terms-of-use': 'Terms of Use',
+        'refund-policy': 'Refund Policy'
     };
 
     return titles[sectionId] || titles['edit-profile'];
@@ -3099,7 +4456,7 @@ function getHomeSidebarSectionTitle(sectionId) {
 function getHomeSidebarSectionHtml(sectionId) {
     if (sectionId === 'edit-profile') {
         const currentName = escapeHtml(currentUser?.name || '');
-        const currentAvatar = currentUser?.avatar || DISPLAY_AVATARS[0];
+        const currentAvatar = getDisplayAvatar(currentUser?.avatar);
         const avatarOptions = DISPLAY_AVATARS.map((avatar) => `
             <button class="sidebar-avatar-option ${avatar === currentAvatar ? 'selected' : ''}" data-avatar="${escapeHtml(avatar)}" onclick="selectSidebarAvatar(this)" type="button">
                 ${escapeHtml(avatar)}
@@ -3154,12 +4511,213 @@ function getHomeSidebarSectionHtml(sectionId) {
 
     if (sectionId === 'contact-us') {
         return `
-            <h4>Contact Us</h4>
-            <p>For login issues, score concerns, recording review, or quiz access help, contact your class teacher or LearnLoot administrator.</p>
+            <h4>Support &amp; Contact</h4>
+            <p>Welcome to <strong>LearnLoot Support</strong>.</p>
+            <p>We are here to help you with account issues, quiz access, payment problems, reward points, withdrawal requests, technical errors, and general questions related to LearnLoot.</p>
+
+            <h5>Contact Email</h5>
+            <p>For any support query, please contact us at:</p>
+            <p><strong><a href="mailto:learnloot777@gmail.com">learnloot777@gmail.com</a></strong></p>
+
+            <h5>Response Time</h5>
+            <p>Our support team usually responds within <strong>3 to 7 working days</strong>.</p>
+            <p>Please note that response time may vary depending on the number of support requests, verification requirements, and the complexity of the issue.</p>
+
+            <h5>What You Can Contact Us For</h5>
+            <ul class="sidebar-copy-list">
+                <li>Account login or signup issues</li>
+                <li>Email verification problems</li>
+                <li>Quiz access problems</li>
+                <li>Payment-related issues</li>
+                <li>Failed or duplicate payment queries</li>
+                <li>Reward points not updated</li>
+                <li>Withdrawal request queries</li>
+                <li>Technical bugs or website errors</li>
+                <li>Suspicious activity or fraud-related concerns</li>
+                <li>General feedback or suggestions</li>
+            </ul>
+
+            <h5>Information to Include in Your Email</h5>
+            <p>To help us resolve your issue faster, please include the following details in your email:</p>
+            <ul class="sidebar-copy-list">
+                <li>Your full name</li>
+                <li>Registered email address</li>
+                <li>Quiz name or quiz ID, if applicable</li>
+                <li>Payment ID or screenshot, if payment-related</li>
+                <li>Withdrawal request details, if applicable</li>
+                <li>Screenshot of the issue, if available</li>
+                <li>Short description of the problem</li>
+            </ul>
+
+            <h5>Payment Support</h5>
+            <p>If your payment was deducted but the quiz was not unlocked, please email us with your registered email address, payment screenshot, transaction ID, and quiz name.</p>
+            <p>After verification, we will either unlock the quiz or guide you with the next steps.</p>
+
+            <h5>Reward Points &amp; Withdrawal Support</h5>
+            <p>Reward points and withdrawals are subject to LearnLoot's verification process, anti-fraud checks, and admin approval.</p>
+            <p>If you have a withdrawal-related issue, please mention your registered email address, withdrawal request date, and the number of points requested for withdrawal.</p>
+
+            <h5>Important Note</h5>
+            <p>LearnLoot is an educational platform that rewards students for learning consistency and quiz performance. Rewards are not guaranteed income and may be cancelled if cheating, fake accounts, suspicious activity, or violation of platform rules is found.</p>
+
+            <h5>Support Email</h5>
+            <p><strong><a href="mailto:learnloot777@gmail.com">learnloot777@gmail.com</a></strong></p>
+
+            <h5>Response Time</h5>
             <div class="sidebar-info-box">
-                <strong>Include these details</strong>
-                <span>Your registered email, chapter name, part number, and a short description of the issue.</span>
+                <strong>3 to 7 working days</strong>
+                <span>Please include your registered email and any screenshots or transaction details that can help us verify the issue.</span>
             </div>
+        `;
+    }
+
+    if (sectionId === 'refund-policy') {
+        return `
+            <h4>Refund and Cancellation Policy</h4>
+            <p><strong>Last Updated:</strong> 6/4/2026</p>
+            <p>Welcome to <strong>LearnLoot</strong>.</p>
+            <p>This Refund and Cancellation Policy explains how payments, cancellations, refunds, failed transactions, duplicate payments, quiz access, rewards, and withdrawal-related issues are handled on LearnLoot.</p>
+            <p>By using LearnLoot and making any payment on the platform, you agree to this Refund and Cancellation Policy.</p>
+
+            <h5>1. About LearnLoot</h5>
+            <p>LearnLoot is an educational quiz and learning platform that helps students improve consistency, practice questions, and earn based on learning activity and quiz performance.</p>
+            <p>Payments made on LearnLoot are for accessing premium educational quizzes, practice content, features, or learning services.</p>
+            <p>LearnLoot earnings or withdrawal balances are separate from quiz access payments and are subject to verification, anti-fraud checks, and admin approval.</p>
+
+            <h5>2. Free Demo Quiz</h5>
+            <p>LearnLoot may provide one or more free demo quizzes for students to understand the platform before purchasing premium quiz access.</p>
+            <p>Users are advised to try the free demo quiz before making any payment for premium quizzes.</p>
+
+            <h5>3. Premium Quiz Payments</h5>
+            <p>Some quizzes or learning content on LearnLoot may require payment before access is granted.</p>
+            <p>After successful payment verification, the selected quiz or premium content will be unlocked for the user account used during the payment.</p>
+            <p>Payments may be made through available payment methods such as UPI, cards, net banking, wallets, or other supported payment options.</p>
+
+            <h5>4. Cancellation Policy</h5>
+            <p>Once a premium quiz is successfully purchased and unlocked, cancellation is generally not allowed.</p>
+            <p>A user cannot cancel a quiz access purchase after the quiz has been unlocked or attempted.</p>
+            <p>Cancellation requests may be considered only if:</p>
+            <ul class="sidebar-copy-list">
+                <li>Payment was made by mistake and the quiz was not unlocked.</li>
+                <li>Duplicate payment was made for the same quiz.</li>
+                <li>Payment was deducted but access was not provided.</li>
+                <li>A technical issue from LearnLoot's side prevented quiz access.</li>
+            </ul>
+            <p>LearnLoot reserves the right to approve or reject cancellation requests after verification.</p>
+
+            <h5>5. Refund Eligibility</h5>
+            <p>A refund may be considered in the following cases:</p>
+            <ul class="sidebar-copy-list">
+                <li>Payment was deducted but the quiz was not unlocked.</li>
+                <li>Duplicate payment was made for the same quiz by the same user.</li>
+                <li>Payment was successful, but LearnLoot failed to provide access due to a technical issue.</li>
+                <li>The user was charged incorrectly.</li>
+                <li>The payment was captured but the related service was not delivered.</li>
+            </ul>
+            <p>Refunds will not be provided in the following cases:</p>
+            <ul class="sidebar-copy-list">
+                <li>The user successfully accessed or attempted the premium quiz.</li>
+                <li>The user changed their mind after purchase.</li>
+                <li>The user selected the wrong quiz and accessed it.</li>
+                <li>The user violated LearnLoot rules or anti-cheating policies.</li>
+                <li>The account was suspended due to fake accounts, cheating, fraud, suspicious activity, or misuse.</li>
+                <li>The user is dissatisfied with quiz difficulty after accessing the quiz.</li>
+                <li>The user failed to complete the quiz due to internet issues, device issues, browser issues, or personal technical problems not caused by LearnLoot.</li>
+                <li>The user expected guaranteed rewards or earnings.</li>
+            </ul>
+
+            <h5>6. Failed Payments</h5>
+            <p>If your payment fails and money is not deducted, you may try again.</p>
+            <p>If your payment fails but money is deducted from your bank account, the amount is usually reversed automatically by the bank or payment provider.</p>
+            <p>If the amount is not reversed within the expected bank processing time, you may contact LearnLoot support with payment details.</p>
+
+            <h5>7. Duplicate Payments</h5>
+            <p>If a user makes duplicate payments for the same quiz using the same registered account, LearnLoot may verify the transaction and refund the duplicate amount.</p>
+            <p>To request a duplicate payment refund, the user must provide:</p>
+            <ul class="sidebar-copy-list">
+                <li>Registered email address</li>
+                <li>Quiz name or quiz ID</li>
+                <li>Payment screenshot</li>
+                <li>Transaction ID</li>
+                <li>Razorpay payment ID, if available</li>
+                <li>Date and time of payment</li>
+            </ul>
+
+            <h5>8. Payment Deducted but Quiz Not Unlocked</h5>
+            <p>If payment is deducted but the quiz is not unlocked, please contact LearnLoot support.</p>
+            <p>After verification, LearnLoot may:</p>
+            <ul class="sidebar-copy-list">
+                <li>Unlock the quiz manually, or</li>
+                <li>Process a refund if access cannot be provided.</li>
+            </ul>
+            <p>Users must contact support with complete payment details for faster resolution.</p>
+
+            <h5>9. Refund Processing Time</h5>
+            <p>Approved refunds may take time to process depending on the payment gateway, bank, or payment method used.</p>
+            <p>Refund processing may generally take 5 to 10 working days after approval, but the final credit timeline may depend on the user's bank or payment provider.</p>
+            <p>LearnLoot is not responsible for delays caused by banks, payment gateways, or third-party payment providers.</p>
+
+            <h5>10. Reward Points and Withdrawal Requests</h5>
+            <p>Refunds are related only to payments made for quiz access or premium content.</p>
+            <p>LearnLoot earnings, wallet cash, or withdrawal requests are handled separately.</p>
+            <p>Rewards and withdrawals are subject to:</p>
+            <ul class="sidebar-copy-list">
+                <li>LearnLoot rules</li>
+                <li>Minimum withdrawal limit</li>
+                <li>User verification</li>
+                <li>Quiz attempt verification</li>
+                <li>Anti-cheating checks</li>
+                <li>Fraud detection</li>
+                <li>Admin approval</li>
+            </ul>
+            <p>LearnLoot reserves the right to cancel rewards or withdrawal requests if cheating, fake accounts, multiple accounts, suspicious activity, technical abuse, or violation of platform rules is detected.</p>
+
+            <h5>12. User Responsibility</h5>
+            <p>Before making any payment, users are responsible for:</p>
+            <ul class="sidebar-copy-list">
+                <li>Checking quiz details</li>
+                <li>Checking quiz price</li>
+                <li>Using the correct account</li>
+                <li>Ensuring stable internet connection</li>
+                <li>Trying the free demo quiz</li>
+                <li>Reading the Terms and Conditions, Privacy Policy, and this Refund and Cancellation Policy</li>
+            </ul>
+            <p>LearnLoot will not be responsible for issues caused by incorrect user details, wrong account usage, personal device problems, or unstable internet connection.</p>
+
+            <h5>13. Fraud, Cheating, and Misuse</h5>
+            <p>Refunds may be denied if LearnLoot finds that the user has engaged in:</p>
+            <ul class="sidebar-copy-list">
+                <li>Cheating during quiz attempts</li>
+                <li>Creating fake or multiple accounts</li>
+                <li>Using another person's account</li>
+                <li>Manipulating payment or reward systems</li>
+                <li>Sharing premium quiz access</li>
+                <li>Using bots, scripts, automation, or unfair methods</li>
+                <li>Abusing technical bugs or loopholes</li>
+                <li>Providing false refund claims</li>
+            </ul>
+            <p>LearnLoot may suspend or restrict such accounts without refund.</p>
+
+            <h5>14. How to Request a Refund</h5>
+            <p>To request a refund, email us at:</p>
+            <p><strong><a href="mailto:learnloot777@gmail.com">learnloot777@gmail.com</a></strong></p>
+            <p>Please include the following details:</p>
+            <ul class="sidebar-copy-list">
+                <li>Full name</li>
+                <li>Registered email address</li>
+                <li>Quiz name or quiz ID</li>
+                <li>Payment amount</li>
+                <li>Payment date and time</li>
+                <li>Transaction ID</li>
+                <li>Razorpay payment ID, if available</li>
+                <li>Screenshot of payment</li>
+                <li>Short explanation of the issue</li>
+            </ul>
+            <p>Incomplete refund requests may take longer to process.</p>
+
+            <h5>15. Support Response Time</h5>
+            <p>Our support team usually responds within <strong>3 to 7 working days</strong>.</p>
+            <p>Response time may vary depending on the number of requests, payment verification requirements, and complexity of the issue.</p>
         `;
     }
 
@@ -3210,7 +4768,7 @@ function getHomeSidebarSectionHtml(sectionId) {
 
             <h5>Support and Data Requests</h5>
             <p>For account help, score review, recording review, reward questions, or data deletion requests, contact the LearnLoot administrator or support team with your registered email and quiz details.</p>
-            <p><strong>LearnLoot Support Team</strong><br>Email: support@learnloot.in</p>
+            <p><strong>LearnLoot Support Team</strong><br>Email: learnloot777@gmail.com</p>
         `;
     }
 
@@ -3248,6 +4806,7 @@ function getHomeSidebarSectionHtml(sectionId) {
         <p>This data is used only for anti-cheating and exam integrity purposes. We do not sell webcam or monitoring data to third parties.</p>
         <p><strong>d) Payment & Reward Information</strong></p>
         <p>If LearnLoot provides rewards, withdrawals, or payments, we may collect UPI ID, wallet details, and transaction history. Payment processing may be handled securely through third-party payment providers.</p>
+        <p><small><strong>Reward conversion:</strong> 100 points = 1 rupee.</small></p>
 
         <h5>3. How We Use Your Information</h5>
         <ul class="sidebar-copy-list">
@@ -3308,7 +4867,7 @@ function getHomeSidebarSectionHtml(sectionId) {
 
         <h5>13. Contact Us</h5>
         <p>If you have any questions regarding this Privacy Policy, you can contact us at:</p>
-        <p><strong>LearnLoot Support Team</strong><br>Email: support@learnloot.in</p>
+        <p><strong>LearnLoot Support Team</strong><br>Email: learnloot777@gmail.com</p>
         <p><strong>LearnLoot</strong><br>Learn. Solve. Earn. Grow</p>
     `;
 }
@@ -3336,7 +4895,7 @@ function openHomeSidebarSection(sectionId = 'edit-profile') {
 }
 
 function selectSidebarAvatar(button) {
-    selectedSidebarAvatar = button?.getAttribute('data-avatar') || currentUser?.avatar || DISPLAY_AVATARS[0];
+    selectedSidebarAvatar = button?.getAttribute('data-avatar') || getDisplayAvatar(currentUser?.avatar);
     document.querySelectorAll('.sidebar-avatar-option').forEach((option) => {
         option.classList.toggle('selected', option === button);
     });
@@ -3346,7 +4905,7 @@ async function saveSidebarProfile() {
     const status = document.getElementById('sidebar-section-status');
     const input = document.getElementById('sidebar-profile-name-input');
     const name = String(input?.value || '').trim();
-    const avatar = selectedSidebarAvatar || currentUser?.avatar || DISPLAY_AVATARS[0];
+    const avatar = getDisplayAvatar(selectedSidebarAvatar || currentUser?.avatar);
 
     if (!name) {
         if (status) {
@@ -3387,13 +4946,13 @@ async function saveSidebarProfile() {
 
         currentUser = {
             ...currentUser,
-            name: currentUser?.name || name,
-            avatar: currentUser?.avatar || avatar
+            name,
+            avatar
         };
 
-        document.getElementById('user-avatar-display').textContent = avatar;
+        document.getElementById('user-avatar-display').textContent = getDisplayAvatar(avatar);
         document.getElementById('user-name-display').textContent = name;
-        document.getElementById('welcome-avatar').textContent = avatar;
+        document.getElementById('welcome-avatar').textContent = getDisplayAvatar(avatar);
         document.getElementById('welcome-name').textContent = `Welcome, ${name}!`;
         updateHomeSidebarUser();
 
@@ -3464,6 +5023,7 @@ function getAttemptLabel() {
 function openChapterParts(ch) {
     closeChapterPartsModal();
 
+    const chapterTitle = getChapterDisplayName(ch);
     const totalQs = getChapterQuestionCount(ch);
     if (totalQs === 0) {
         alert('No questions are available for this chapter yet.');
@@ -3478,12 +5038,15 @@ function openChapterParts(ch) {
     const partsHtml = range(1, totalParts).map((partNumber) => {
         const info = getChapterPartInfo(ch, partNumber);
         const isPausedPart = pausedInfo && pausedInfo.partNumber === partNumber;
+        const isAttemptedPart = hasAttemptedQuizPart(ch, partNumber);
+        const actionLabel = isAttemptedPart ? 'Attempted' : (isPausedPart ? 'Resume Quiz' : 'Start Quiz');
+        const actionIcon = isAttemptedPart ? 'fa-circle-check' : 'fa-play';
         return `
-            <button class="part-option ${isPausedPart ? 'paused' : ''}" onclick='startTest(${escapeHtml(JSON.stringify(ch))}, ${partNumber})'>
-                <span class="part-number">Part ${partNumber}</span>
-                <span class="part-range">Random set from ${totalQs} questions</span>
-                <span class="part-count">${info.questionCount} questions${isPausedPart ? ' | Resume available' : ''}</span>
-                <span class="part-action"><i class="fas fa-play"></i> ${isPausedPart ? 'Resume Test' : 'Start Test'}</span>
+            <button class="part-option ${isPausedPart ? 'paused' : ''} ${isAttemptedPart ? 'attempted' : ''}" ${isAttemptedPart ? 'disabled' : `onclick='startTest(${escapeHtml(JSON.stringify(ch))}, ${partNumber})'`}>
+                <span class="part-number">Quiz ${partNumber}</span>
+                <span class="part-range">Random quiz from ${totalQs} questions</span>
+                <span class="part-count">${info.questionCount} questions${isAttemptedPart ? ' | Already attempted' : (isPausedPart ? ' | Resume available' : '')}</span>
+                <span class="part-action"><i class="fas ${actionIcon}"></i> ${actionLabel}</span>
             </button>`;
     }).join('');
 
@@ -3492,8 +5055,8 @@ function openChapterParts(ch) {
             <div class="modal-card part-modal">
                 <div class="part-modal-header">
                     <div>
-                        <h2>${escapeHtml(ch)}</h2>
-                        <p class="modal-subtitle">${totalQs} questions available. Each part starts with a fresh random set of up to ${CHAPTER_PART_SIZE}.</p>
+                        <h2>${escapeHtml(chapterTitle)}</h2>
+                        <p class="modal-subtitle">${totalQs} questions available. Each quiz starts with a fresh random set of up to ${CHAPTER_PART_SIZE}.</p>
                     </div>
                     <button class="icon-btn" onclick="closeChapterPartsModal()" title="Close">
                         <i class="fas fa-times"></i>
@@ -3670,16 +5233,16 @@ function renderLeaderboard() {
         container.innerHTML = `
             <div class="text-center" style="padding:2rem;">
                 <i class="fas fa-trophy fa-3x mb-2" style="color:var(--warning);opacity:0.5;"></i>
-                <p style="color:var(--text-secondary);margin-top:1rem;">No scores yet. Complete a test to appear here!</p>
+                <p style="color:var(--text-secondary);margin-top:1rem;">No users yet. Sign in or complete a test to appear here!</p>
             </div>`;
         return;
     }
 
     const medals = ['🥇','🥈','🥉'];
-    container.innerHTML = leaderboard.slice(0, 10).map((e, i) => `
+    container.innerHTML = leaderboard.slice(0, MAX_LEADERBOARD_USERS).map((e, i) => `
         <div class="leaderboard-item rank-${i < 3 ? i+1 : 'other'}">
             <div class="lb-rank">${medals[i] || `#${i+1}`}</div>
-            <div class="lb-avatar">${escapeHtml(e.avatar || DISPLAY_AVATARS[0])}</div>
+            <div class="lb-avatar">${escapeHtml(getDisplayAvatar(e.avatar))}</div>
             <div class="lb-info">
                 <strong>${escapeHtml(e.name || 'Student')}</strong>
                 <span>${Number(e.testsCompleted || 0)} tests | ${getAccuracyText(e.totalCorrectAnswers, e.totalQuestionsAttempted)}</span>
@@ -3711,8 +5274,17 @@ let accuracyChartInst = null;
 let chapterChartInst  = null;
 let testHistory = [];
 
+function getAttemptIdentity(attempt = {}) {
+    return String(attempt.attemptId || attempt.clientAttemptId || attempt.quizSeed || '').trim();
+}
+
 function recordAttemptLocally(attempt) {
-    testHistory.push(normalizeAttemptData(attempt, currentUser));
+    const normalizedAttempt = normalizeAttemptData(attempt, currentUser);
+    const nextIdentity = getAttemptIdentity(normalizedAttempt);
+    if (nextIdentity) {
+        testHistory = testHistory.filter((entry) => getAttemptIdentity(entry) !== nextIdentity);
+    }
+    testHistory.push(normalizedAttempt);
     if (testHistory.length > 100) testHistory = testHistory.slice(-100);
     chapterHistory = buildChapterHistoryFromAttempts(testHistory);
 }
@@ -3881,6 +5453,7 @@ let resumeAnswerLockIndex = -1;
 let time    = QUIZ_TOTAL_SECONDS;
 let timer;
 let quizTimerEndsAt = 0;
+let lastProgressAutosaveAt = 0;
 let questionAdvanceTimeout = null;
 let currentChapter  = '';
 let currentPartNumber = 1;
@@ -3892,6 +5465,263 @@ let chapterHistory  = {};
 let startTime;
 let elapsedTimeBeforePauseMs = 0;
 let liveDemoWalletBalance = 0;
+let selectedMegaCourseId = '';
+let selectedCourseId = '';
+let pageExitInProgress = false;
+let hiddenViolationTimeout = null;
+
+const CLASS_11_MATH_CHAPTERS = [
+    'Basic Mathematics',
+    'Sets and Relations',
+    'Functions',
+    'Trigonometric Ratios and Identities',
+    'Trigonometric Equations',
+    'Inverse Trigonometric Functions',
+    'Heights and Distances',
+    'Complex Numbers',
+    'Quadratic Equation',
+    'Sequences and Series',
+    'Binomial Theorem',
+    'Permutation and Combination',
+    'Probability',
+    'Straight Lines',
+    'Circle',
+    'Parabola',
+    'Ellipse',
+    'Hyperbola',
+    'Properties of Triangles',
+    'Mathematical Reasoning',
+    'Statistics'
+];
+
+const CLASS_12_MATH_CHAPTERS = [
+    'Matrices',
+    'Determinants',
+    'Vector Algebra',
+    'Three Dimensional Geometry',
+    'Limits',
+    'Continuity and Differentiability',
+    'Differentiation',
+    'Application of Derivatives',
+    'Indefinite Integration',
+    'Definite Integration',
+    'Area Under Curves',
+    'Differential Equations'
+];
+
+const JEE_MATH_PREFIX = 'JEE Maths - ';
+const toJeeMathChapterEntries = (chapterNames) => chapterNames.map((name) => ({
+    name: `${JEE_MATH_PREFIX}${name}`,
+    title: name
+}));
+
+const MHT_CET_PHYSICS_PREFIX = 'MHT-CET Physics - ';
+const MHT_CET_CHEMISTRY_PREFIX = 'MHT-CET Chemistry - ';
+
+const getCourseChapterName = (entry) => {
+    if (entry && typeof entry === 'object') return String(entry.name || entry.id || entry.title || '').trim();
+    return String(entry || '').trim();
+};
+
+const getCourseChapterTitle = (entry) => {
+    if (entry && typeof entry === 'object') return String(entry.title || entry.label || getCourseChapterName(entry)).trim();
+    return getChapterDisplayName(entry);
+};
+
+const toMhtCetChapterEntries = (prefix, chapterNames) => chapterNames.map((entry) => {
+    const name = getCourseChapterName(entry);
+    const title = getCourseChapterTitle(entry);
+    return {
+        name: `${prefix}${title}`,
+        title
+    };
+});
+
+const CLASS_11_PHYSICS_CHAPTERS = [
+    'Units and Dimensions',
+    'Mathematics in Physics (Vectors, Calculus Basics)',
+    'Motion in One Dimension',
+    'Motion in Two Dimensions',
+    'Laws of Motion',
+    'Work, Power and Energy',
+    'Center of Mass, Momentum and Collision',
+    'Rotational Motion',
+    'Gravitation',
+    'Mechanical Properties of Solids',
+    'Mechanical Properties of Fluids',
+    'Thermal Properties of Matter',
+    'Kinetic Theory of Gases',
+    'Thermodynamics',
+    'Oscillations',
+    'Waves and Sound'
+];
+
+const CLASS_12_PHYSICS_CHAPTERS = [
+    'Electrostatics',
+    'Capacitance',
+    'Current Electricity',
+    'Magnetic Effects of Current',
+    'Magnetic Properties of Matter',
+    'Electromagnetic Induction',
+    'Alternating Current',
+    'Electromagnetic Waves',
+    'Ray Optics',
+    'Wave Optics',
+    'Dual Nature of Matter',
+    'Atomic Physics',
+    'Nuclear Physics',
+    'Semiconductors',
+    'Experimental Physics'
+];
+
+const CLASS_11_JEE_CHEMISTRY_CHAPTERS = [
+    'Some Basic Concepts of Chemistry',
+    'Structure of Atom',
+    'Periodic Classification',
+    'Chemical Bonding',
+    { name: 'Chemistry - Thermodynamics', title: 'Thermodynamics' },
+    'Chemical Equilibrium',
+    'Ionic Equilibrium',
+    'Redox Reactions',
+    'General Organic Chemistry (GOC)',
+    'Hydrocarbons'
+];
+
+const CLASS_12_JEE_CHEMISTRY_CHAPTERS = [
+    'Solutions',
+    'Electrochemistry',
+    'Chemical Kinetics',
+    'd & f Block',
+    'Coordination Compounds',
+    'p-Block (13 & 14)',
+    'p-Block (15-18)',
+    'Haloalkanes & Haloarenes',
+    'Alcohols, Phenols & Ethers',
+    'Aldehydes & Ketones',
+    'Carboxylic Acid Derivatives',
+    'Amines',
+    'Biomolecules',
+    'Practical Chemistry'
+];
+
+const CHAPTER_DISPLAY_NAMES = {
+    'Chemistry - Thermodynamics': 'Thermodynamics'
+};
+
+const COURSE_CATALOG = [
+    {
+        id: 'class-11-math',
+        title: 'Class 11 Mathematics',
+        icon: 'fa-square-root-variable',
+        description: `${CLASS_11_MATH_CHAPTERS.length} JEE Maths chapters`,
+        status: 'Open chapters',
+        isEmpty: false,
+        chapterNames: CLASS_11_MATH_CHAPTERS
+    },
+    {
+        id: 'class-12-math',
+        title: 'Class 12 Mathematics',
+        icon: 'fa-infinity',
+        description: `${CLASS_12_MATH_CHAPTERS.length} JEE Maths chapters`,
+        status: 'Open chapters',
+        isEmpty: false,
+        chapterNames: CLASS_12_MATH_CHAPTERS
+    },
+    {
+        id: 'class-11-physics',
+        title: 'Class 11th Physics',
+        icon: 'fa-atom',
+        description: `${CLASS_11_PHYSICS_CHAPTERS.length} MHT-CET Physics chapters`,
+        status: 'Open chapters',
+        isEmpty: false,
+        chapterNames: toMhtCetChapterEntries(MHT_CET_PHYSICS_PREFIX, CLASS_11_PHYSICS_CHAPTERS)
+    },
+    {
+        id: 'class-12-physics',
+        title: 'Class 12th Physics',
+        icon: 'fa-atom',
+        description: `${CLASS_12_PHYSICS_CHAPTERS.length} MHT-CET Physics chapters`,
+        status: 'Open chapters',
+        isEmpty: false,
+        chapterNames: toMhtCetChapterEntries(MHT_CET_PHYSICS_PREFIX, CLASS_12_PHYSICS_CHAPTERS)
+    },
+    {
+        id: 'class-11-chemistry',
+        title: 'Class 11th Chemistry',
+        icon: 'fa-flask-vial',
+        description: `${CLASS_11_JEE_CHEMISTRY_CHAPTERS.length} MHT-CET Chemistry chapters`,
+        status: 'Open chapters',
+        isEmpty: false,
+        chapterNames: toMhtCetChapterEntries(MHT_CET_CHEMISTRY_PREFIX, CLASS_11_JEE_CHEMISTRY_CHAPTERS)
+    },
+    {
+        id: 'class-12-chemistry',
+        title: 'Class 12th Chemistry',
+        icon: 'fa-flask-vial',
+        description: `${CLASS_12_JEE_CHEMISTRY_CHAPTERS.length} MHT-CET Chemistry chapters`,
+        status: 'Open chapters',
+        isEmpty: false,
+        chapterNames: toMhtCetChapterEntries(MHT_CET_CHEMISTRY_PREFIX, CLASS_12_JEE_CHEMISTRY_CHAPTERS)
+    }
+];
+
+const JEE_COURSE_OVERRIDES = {
+    'class-11-math': {
+        description: `${CLASS_11_MATH_CHAPTERS.length} JEE Maths chapters`,
+        status: 'Open chapters',
+        isEmpty: false,
+        chapterNames: toJeeMathChapterEntries(CLASS_11_MATH_CHAPTERS)
+    },
+    'class-12-math': {
+        description: `${CLASS_12_MATH_CHAPTERS.length} JEE Maths chapters`,
+        status: 'Open chapters',
+        isEmpty: false,
+        chapterNames: toJeeMathChapterEntries(CLASS_12_MATH_CHAPTERS)
+    },
+    'class-11-physics': {
+        description: `${CLASS_11_PHYSICS_CHAPTERS.length} JEE Physics chapters`,
+        status: 'Open chapters',
+        isEmpty: false,
+        chapterNames: CLASS_11_PHYSICS_CHAPTERS
+    },
+    'class-12-physics': {
+        description: `${CLASS_12_PHYSICS_CHAPTERS.length} JEE Physics chapters`,
+        status: 'Open chapters',
+        isEmpty: false,
+        chapterNames: CLASS_12_PHYSICS_CHAPTERS
+    },
+    'class-11-chemistry': {
+        description: `${CLASS_11_JEE_CHEMISTRY_CHAPTERS.length} JEE Chemistry chapters`,
+        status: 'Open chapters',
+        isEmpty: false,
+        chapterNames: CLASS_11_JEE_CHEMISTRY_CHAPTERS
+    },
+    'class-12-chemistry': {
+        description: `${CLASS_12_JEE_CHEMISTRY_CHAPTERS.length} JEE Chemistry chapters`,
+        status: 'Open chapters',
+        isEmpty: false,
+        chapterNames: CLASS_12_JEE_CHEMISTRY_CHAPTERS
+    }
+};
+
+const MEGA_COURSE_CATALOG = [
+    {
+        id: 'mht-cet-course',
+        title: 'MHT-CET Course',
+        icon: 'fa-graduation-cap',
+        description: 'Class 11th & 12th Maths, Physics, Chemistry',
+        status: 'Open subjects',
+        courseIds: COURSE_CATALOG.map((course) => course.id)
+    },
+    {
+        id: 'jee-course',
+        title: 'JEE Course',
+        icon: 'fa-book-open-reader',
+        description: 'Class 11th & 12th Maths, Physics, Chemistry',
+        status: 'Open subjects',
+        courseIds: COURSE_CATALOG.map((course) => course.id)
+    }
+];
 
 // DOM references (assigned after DOM loads)
 let home, quiz, result, chapterList, historyList;
@@ -3919,17 +5749,173 @@ function createParticles() {
 // ============================================================
 // ===== CHAPTER LIST =====
 // ============================================================
+function getMegaCourseById(megaCourseId) {
+    return MEGA_COURSE_CATALOG.find((course) => course.id === megaCourseId) || null;
+}
+
+function getChapterEntryRecord(entry) {
+    if (entry && typeof entry === 'object') {
+        const name = String(entry.name || entry.id || entry.title || '').trim();
+        const title = String(entry.title || entry.label || name).trim();
+        return name ? { name, title: title || name } : null;
+    }
+
+    const name = String(entry || '').trim();
+    return name ? { name, title: getChapterDisplayName(name) } : null;
+}
+
+function getChapterDisplayName(chapterName) {
+    const name = String(chapterName || '').trim();
+    if (name.startsWith(MHT_CET_PHYSICS_PREFIX)) return name.slice(MHT_CET_PHYSICS_PREFIX.length);
+    if (name.startsWith(MHT_CET_CHEMISTRY_PREFIX)) return name.slice(MHT_CET_CHEMISTRY_PREFIX.length);
+    return CHAPTER_DISPLAY_NAMES[name] || name;
+}
+
+function getCourseForMegaCourse(course, megaCourseId = selectedMegaCourseId) {
+    if (!course) return null;
+    const overrides = megaCourseId === 'jee-course' ? JEE_COURSE_OVERRIDES[course.id] : null;
+    return overrides ? { ...course, ...overrides } : { ...course };
+}
+
+function getCourseById(courseId, megaCourseId = selectedMegaCourseId) {
+    return getCourseForMegaCourse(
+        COURSE_CATALOG.find((course) => course.id === courseId) || null,
+        megaCourseId
+    );
+}
+
+function setChapterSectionTitle(title, icon = 'fa-layer-group') {
+    const titleEl = document.getElementById('chapter-section-title');
+    if (!titleEl) return;
+    titleEl.innerHTML = `<i class="fas ${icon}"></i> ${escapeHtml(title)}`;
+}
+
+function getCourseToolbarHtml(course, note = '') {
+    return `
+        <div class="course-toolbar">
+            <button class="btn btn-secondary btn-sm" type="button" onclick="showCourseCards()">
+                <i class="fas fa-arrow-left"></i> Subjects
+            </button>
+            <div class="course-toolbar-copy">
+                <span>Selected Course</span>
+                <h3>${escapeHtml(course.title)}</h3>
+                ${note ? `<p>${escapeHtml(note)}</p>` : ''}
+            </div>
+        </div>`;
+}
+
+function getMegaCourseToolbarHtml(megaCourse) {
+    return `
+        <div class="course-toolbar">
+            <button class="btn btn-secondary btn-sm" type="button" onclick="showMegaCourseCards()">
+                <i class="fas fa-arrow-left"></i> Courses
+            </button>
+            <div class="course-toolbar-copy">
+                <span>Selected Course</span>
+                <h3>${escapeHtml(megaCourse.title)}</h3>
+                <p>Choose Class 11th or 12th Maths, Physics, or Chemistry.</p>
+            </div>
+        </div>`;
+}
+
+function renderMegaCourseCards() {
+    setChapterSectionTitle('Choose Your Course');
+    chapterList.innerHTML = MEGA_COURSE_CATALOG.map((course, index) => `
+        <button class="card course-card" type="button" onclick="selectMegaCourse('${course.id}')">
+            <div class="course-card-icon"><i class="fas ${course.icon}"></i></div>
+            <div class="chapter-number">${index + 1}</div>
+            <h3>${escapeHtml(course.title)}</h3>
+            <p>${escapeHtml(course.description)}</p>
+            <span class="course-card-status">${escapeHtml(course.status)}</span>
+        </button>`).join('');
+}
+
+function renderCourseCards() {
+    const selectedMegaCourse = getMegaCourseById(selectedMegaCourseId);
+    if (!selectedMegaCourse) {
+        selectedMegaCourseId = '';
+        renderMegaCourseCards();
+        return;
+    }
+
+    const courseIds = Array.isArray(selectedMegaCourse.courseIds) ? selectedMegaCourse.courseIds : [];
+    const courses = courseIds
+        .map((courseId) => getCourseById(courseId, selectedMegaCourse.id))
+        .filter(Boolean);
+    setChapterSectionTitle(selectedMegaCourse.title, selectedMegaCourse.icon);
+    chapterList.innerHTML = getMegaCourseToolbarHtml(selectedMegaCourse) + courses.map((course, index) => `
+        <button class="card course-card ${course.isEmpty ? 'course-card-empty' : ''}" type="button" onclick="selectCourse('${course.id}')">
+            <div class="course-card-icon"><i class="fas ${course.icon}"></i></div>
+            <div class="chapter-number">${index + 1}</div>
+            <h3>${escapeHtml(course.title)}</h3>
+            ${course.status ? `<span class="course-card-status">${escapeHtml(course.status)}</span>` : '<span class="course-card-status empty-status">&nbsp;</span>'}
+        </button>`).join('');
+}
+
+function selectMegaCourse(megaCourseId) {
+    selectedMegaCourseId = megaCourseId;
+    selectedCourseId = '';
+    generateChapterList();
+}
+
+function selectCourse(courseId) {
+    selectedCourseId = courseId;
+    generateChapterList();
+}
+
+function showCourseCards() {
+    selectedCourseId = '';
+    generateChapterList();
+}
+
+function showMegaCourseCards() {
+    selectedMegaCourseId = '';
+    selectedCourseId = '';
+    generateChapterList();
+}
+
 function generateChapterList() {
     chapterList = document.getElementById('chapter-list');
     historyList = document.getElementById('history-list');
     if (!chapterList) return;
 
+    clearStalePausedTestState();
     chapterList.innerHTML = '';
-    let num = 1;
-    const chapterNames = getChapterNames();
+    const selectedCourse = getCourseById(selectedCourseId, selectedMegaCourseId);
+    if (!selectedCourse) {
+        selectedCourseId = '';
+        renderCourseCards();
+        updateDashboard();
+        updateHistory();
+        return;
+    }
 
-    if (chapterNames.length === 0) {
+    setChapterSectionTitle(selectedCourse.title, selectedCourse.icon);
+
+    if (selectedCourse.isEmpty) {
         chapterList.innerHTML = `
+            ${getCourseToolbarHtml(selectedCourse)}
+            <div class="course-empty-state">
+                <i class="fas fa-folder-open"></i>
+                <h3>No chapters added yet</h3>
+            </div>`;
+        updateDashboard();
+        updateHistory();
+        return;
+    }
+
+    let num = 1;
+    const rawChapterNames = Array.isArray(selectedCourse.chapterNames) && selectedCourse.chapterNames.length
+        ? selectedCourse.chapterNames
+        : getChapterNames();
+    const chapterRecords = rawChapterNames
+        .map(getChapterEntryRecord)
+        .filter(Boolean);
+    const toolbarHtml = getCourseToolbarHtml(selectedCourse, `${chapterRecords.length} chapters available below.`);
+
+    if (chapterRecords.length === 0) {
+        chapterList.innerHTML = `
+            ${toolbarHtml}
             <div class="dashboard" style="grid-column:1/-1;text-align:center;">
                 <h3 style="color:var(--warning);margin-bottom:0.75rem;">No chapters available</h3>
                 <p style="color:var(--text-secondary);">Add questions to the chapter bank to show tests here.</p>
@@ -3939,12 +5925,15 @@ function generateChapterList() {
         return;
     }
 
-    chapterNames.forEach(ch => {
+    chapterList.innerHTML = toolbarHtml;
+    chapterRecords.forEach((chapterRecord) => {
+        const ch           = chapterRecord.name;
+        const chapterTitle = chapterRecord.title || getChapterDisplayName(ch);
         const history      = chapterHistory[ch] || [];
         const attempts     = history.length;
         const totalQs      = getChapterQuestionCount(ch);
         const partCount    = getChapterPartCount(ch);
-        const perAttemptQs = Math.min(CHAPTER_PART_SIZE, totalQs);
+        const perAttemptQs = Math.min(Number(getChapterRecord(ch)?.perPart || CHAPTER_PART_SIZE), totalQs);
         const bestAttempt  = attempts > 0
             ? history.reduce((best, attempt) => {
                 if (!best) return attempt;
@@ -3953,15 +5942,17 @@ function generateChapterList() {
                 return best;
             }, null)
             : null;
-        const bestScore    = bestAttempt ? `${bestAttempt.score}/${bestAttempt.total || perAttemptQs}` : `0/${perAttemptQs}`;
+        const bestScore    = bestAttempt
+            ? `${bestAttempt.score}/${bestAttempt.total || perAttemptQs}`
+            : totalQs > 0 ? `0/${perAttemptQs}` : '-';
         const isPaused     = pausedTestState && pausedTestState.chapter === ch;
 
         chapterList.innerHTML += `
             <div class="card" onclick='openChapterParts(${escapeHtml(JSON.stringify(ch))})'>
                 <div class="chapter-number">${num++}</div>
-                <h3 style="padding-top:0.5rem;">${ch}</h3>
+                <h3 style="padding-top:0.5rem;">${escapeHtml(chapterTitle)}</h3>
                 <div class="chapter-info">
-                    <p style="color:var(--text-secondary)">${totalQs} questions available | ${partCount} parts | ${perAttemptQs} per part</p>
+                    <p style="color:var(--text-secondary)">${totalQs} questions available | ${partCount} quizzes | ${perAttemptQs} per quiz</p>
                     ${isPaused ? '<p style="color:var(--warning);font-weight:700;margin-top:0.5rem;">Resume available</p>' : ''}
                     <div class="chapter-stats">
                         <div class="stat-item">
@@ -3981,6 +5972,158 @@ function generateChapterList() {
     updateHistory();
 }
 
+function getReferralCodeForCurrentUser() {
+    return normalizeReferralCode(currentUser?.referralCode);
+}
+
+function getReferralLink() {
+    const code = getReferralCodeForCurrentUser();
+    const origin = window.location.origin || 'https://your-learnloot-site.netlify.app';
+    return `${origin.replace(/\/+$/, '')}/signup?ref=${encodeURIComponent(code)}`;
+}
+
+async function copyTextToClipboard(text, successMessage) {
+    try {
+        if (navigator.clipboard?.writeText) {
+            await navigator.clipboard.writeText(text);
+        } else {
+            const textarea = document.createElement('textarea');
+            textarea.value = text;
+            textarea.setAttribute('readonly', '');
+            textarea.style.position = 'fixed';
+            textarea.style.left = '-9999px';
+            document.body.appendChild(textarea);
+            textarea.select();
+            document.execCommand('copy');
+            textarea.remove();
+        }
+        showPointsNotification(successMessage, 'points-added');
+    } catch (error) {
+        showPointsNotification('Could not copy. Please copy it manually.', 'points-lost');
+    }
+}
+
+function copyReferralCode() {
+    const code = getReferralCodeForCurrentUser();
+    if (!code) {
+        showPointsNotification('Referral code is still being generated. Refresh once after login.', 'points-lost');
+        return;
+    }
+    copyTextToClipboard(code, 'Referral code copied.');
+}
+
+function copyReferralLink() {
+    const code = getReferralCodeForCurrentUser();
+    if (!code) {
+        showPointsNotification('Referral link is not ready yet.', 'points-lost');
+        return;
+    }
+    copyTextToClipboard(getReferralLink(), 'Referral link copied.');
+}
+
+function shareReferralOnWhatsApp() {
+    const code = getReferralCodeForCurrentUser();
+    if (!code) {
+        showPointsNotification('Referral code is not ready yet.', 'points-lost');
+        return;
+    }
+    const message = `Hey! Join LearnLoot and start learning with quizzes and reward points. Use my referral code: ${code}`;
+    const shareUrl = `https://wa.me/?text=${encodeURIComponent(`${message} ${getReferralLink()}`)}`;
+    window.open(shareUrl, '_blank', 'noopener,noreferrer');
+}
+
+function hideReferralCard() {
+    const card = document.getElementById('referral-card');
+    if (card) card.style.display = 'none';
+}
+
+function openReferralCard() {
+    const card = document.getElementById('referral-card');
+    if (!card) return;
+    card.style.display = 'block';
+    renderReferralCard();
+    card.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function closeReferralCard() {
+    const card = document.getElementById('referral-card');
+    if (!card) return;
+    card.style.display = 'none';
+    scrollToPageTop();
+}
+
+function renderReferralCard() {
+    const container = document.getElementById('referral-content');
+    if (!container) return;
+
+    if (!currentUser) {
+        container.innerHTML = '<div class="admin-empty">Sign in to view your referral code.</div>';
+        return;
+    }
+
+    const readyCode = getReferralCodeForCurrentUser();
+    const code = readyCode || 'Generating...';
+    const link = readyCode ? getReferralLink() : 'Referral link will appear after your profile loads.';
+    const totalReferrals = getNumericValue(currentUser.totalReferrals);
+    const referralPoints = getNumericValue(currentUser.referralPoints);
+    const historyHtml = referralHistory.length
+        ? referralHistory.map((entry) => `
+            <div class="referral-history-item ${entry.suspicious ? 'flagged' : ''}">
+                <div>
+                    <strong>${escapeHtml(entry.referredName || entry.referredEmail || entry.referredUserId || 'New user')}</strong>
+                    <span>${escapeHtml(entry.referredEmail || entry.referredUserId || 'Referral user')}</span>
+                </div>
+                <div>
+                    <strong>${formatPointAmount(entry.rewardPoints)} points</strong>
+                    <span>${escapeHtml(entry.status)} | ${formatDateTime(entry.createdAtMs)}</span>
+                </div>
+            </div>
+        `).join('')
+        : '<div class="admin-empty">No referral history yet.</div>';
+
+    container.innerHTML = `
+        <div class="referral-grid">
+            <div class="referral-code-box">
+                <span>Your referral code</span>
+                <strong>${escapeHtml(code)}</strong>
+                <button class="btn btn-primary btn-sm" onclick="copyReferralCode()" type="button">
+                    <i class="fas fa-copy"></i> Copy Code
+                </button>
+            </div>
+            <div class="referral-link-box">
+                <span>Referral link</span>
+                <p>${escapeHtml(link)}</p>
+                <div class="referral-actions">
+                    <button class="btn btn-primary btn-sm" onclick="copyReferralLink()" type="button">
+                        <i class="fas fa-link"></i> Copy Link
+                    </button>
+                    <button class="btn btn-success btn-sm" onclick="shareReferralOnWhatsApp()" type="button">
+                        <i class="fab fa-whatsapp"></i> WhatsApp
+                    </button>
+                </div>
+            </div>
+        </div>
+        <div class="referral-stats">
+            <div class="stat-card">
+                <div class="stat-number">${totalReferrals}</div>
+                <div>Total Referrals</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-number">${formatPointAmount(referralPoints)}</div>
+                <div>Referral Points</div>
+            </div>
+        </div>
+        ${referralPoints > 0 ? `<div class="referral-success-note">Congratulations! You earned ${formatPointAmount(REFERRAL_REWARD_POINTS)} LearnLoot Points for a successful referral.</div>` : ''}
+        <div class="referral-history">
+            <h3>Referral History</h3>
+            ${historyHtml}
+        </div>
+        <div class="referral-terms">
+            Invite your friends to LearnLoot and get ${formatPointAmount(REFERRAL_REWARD_POINTS)} when they sign up using your referral code. Referral rewards are LearnLoot Points and are subject to LearnLoot rules. Fake accounts, self-referrals, or suspicious activity may lead to cancellation of points.
+        </div>
+    `;
+}
+
 function updateDashboard() {
     const el = id => document.getElementById(id);
     if (el('tests-completed-display')) el('tests-completed-display').innerText = testsCompleted;
@@ -3992,6 +6135,7 @@ function updateDashboard() {
     const h = Math.floor(totalTimeSpent / 3600);
     const m = Math.floor((totalTimeSpent % 3600) / 60);
     if (el('time-spent-display')) el('time-spent-display').innerText = `${h}h ${m}m`;
+    renderReferralCard();
 }
 
 function updateHistory() {
@@ -4019,8 +6163,8 @@ function updateHistory() {
         html += `
             <div class="leaderboard-item">
                 <div>
-                    <strong>${escapeHtml(attempt.chapter)}</strong>
-                    <div style="font-size:0.85rem;color:rgba(255,255,255,0.6);">${escapeHtml(attempt.partLabel || 'Full Attempt')} | ${formatDateTime(attempt.timestamp)}</div>
+                    <strong>${escapeHtml(getChapterDisplayName(attempt.chapter))}</strong>
+                    <div style="font-size:0.85rem;color:rgba(255,255,255,0.6);">${escapeHtml(attempt.partLabel || 'Full Quiz')} | ${formatDateTime(attempt.timestamp)}</div>
                     ${suspiciousText}
                 </div>
                 <div style="text-align:right;">
@@ -4036,9 +6180,20 @@ function updateHistory() {
 // ===== QUIZ ENGINE =====
 // ============================================================
 async function startTest(ch, partNumber = 1) {
+    clearStalePausedTestState();
     const partInfo = getChapterPartInfo(ch, partNumber);
     if (partInfo.questionCount === 0) {
         alert('No questions are available for this part yet.');
+        return;
+    }
+
+    const isResumingRequestedPart = Boolean(
+        pausedTestState
+        && pausedTestState.chapter === ch
+        && Number(pausedTestState.partNumber || 1) === partInfo.partNumber
+    );
+    if (hasAttemptedQuizPart(ch, partInfo.partNumber) && !isResumingRequestedPart) {
+        alert('You have already attempted this quiz. Each quiz can be attempted only once.');
         return;
     }
 
@@ -4046,12 +6201,12 @@ async function startTest(ch, partNumber = 1) {
         const pausedPartNumber = Number(pausedTestState.partNumber || 1);
         if (pausedPartNumber !== partInfo.partNumber) {
             if (!confirm('Starting this part will discard your paused test for this chapter. Continue?')) return;
-            pausedTestState = null;
+            setPausedTestState(null);
         }
     }
 
     if (pausedTestState && pausedTestState.chapter !== ch) {
-        pausedTestState = null;
+        setPausedTestState(null);
     }
 
     const isResumingSamePart = Boolean(
@@ -4100,7 +6255,7 @@ async function startTest(ch, partNumber = 1) {
             currentQuizSeed = String(pausedTestState.quizSeed || '');
             currentQuizAttemptId = String(pausedTestState.quizAttemptId || pausedTestState.clientAttemptId || '');
             if (!currentQuizAttemptId) {
-                pausedTestState = null;
+                setPausedTestState(null);
                 stopCamera();
                 alert('This paused test must be restarted because it was not issued by the backend.');
                 return;
@@ -4120,6 +6275,7 @@ async function startTest(ch, partNumber = 1) {
 
     clearInterval(timer);
     clearQuestionAdvanceTimeout();
+    clearHiddenViolationTimeout();
 
     home    = document.getElementById('home');
     quiz    = document.getElementById('quiz');
@@ -4127,6 +6283,8 @@ async function startTest(ch, partNumber = 1) {
 
     testStartSnapshot = {
         totalPoints,
+        testsCompleted,
+        totalTimeSpent,
         totalCorrectAnswers,
         totalQuestionsAttempted
     };
@@ -4189,7 +6347,7 @@ async function startTest(ch, partNumber = 1) {
     setHomeSidebarButtonVisible(false);
     scrollToPageTop();
 
-    document.getElementById('chapter-title').innerText   = `${ch} - ${currentPartLabel}`;
+    document.getElementById('chapter-title').innerText   = `${getChapterDisplayName(ch)} - ${currentPartLabel}`;
     document.getElementById('total-questions').innerText = qList.length;
 
     // Update difficulty badge
@@ -4200,9 +6358,11 @@ async function startTest(ch, partNumber = 1) {
     }
 
     buildNav();
+    await showQuizScoringPopup();
     loadQ();
     startTimer();
     updateWallet();
+    saveCurrentTestProgress();
 }
 
 function loadQ() {
@@ -4210,60 +6370,90 @@ function loadQ() {
 
     const q = qList[index];
     const isTimedOut = Boolean(timedOutQuestions[index]);
-    const isLocked = answers[index] !== null || isTimedOut;
-    if (isLocked) questionResumeCarryMs = 0;
-    currentQuestionStartedAt = isLocked ? 0 : Date.now();
-    document.getElementById('qText').innerText    = `${index + 1}. ${q.q}`;
+    if (isTimedOut) questionResumeCarryMs = 0;
+    currentQuestionStartedAt = isTimedOut ? 0 : Date.now();
+    const qTextEl = document.getElementById('qText');
+    if (q.qHtml) {
+        qTextEl.innerHTML = `<span>${index + 1}.</span> ${q.qHtml}`;
+    } else {
+        qTextEl.innerText = `${index + 1}. ${q.q}`;
+    }
     document.getElementById('current-question').innerText = index + 1;
 
     let html = '';
     q.o.forEach((opt, i) => {
         const sel      = answers[index] === i;
         let cls = 'option';
-        if (isLocked) {
-            if (sel) {
-                cls += ' selected';
-            } else {
-                cls += ' disabled';
-            }
-        } else if (sel) { cls += ' selected'; }
+        if (isTimedOut && !sel) cls += ' disabled';
+        if (sel) cls += ' selected';
+        const optionHtml = Array.isArray(q.oHtml) && q.oHtml[i]
+            ? q.oHtml[i]
+            : escapeHtml(opt);
 
         html += `<div class="${cls}" onclick="selectOption(${i})">
-            <span style="font-weight:700">${String.fromCharCode(65+i)}.</span> ${opt}
+            <span style="font-weight:700">${String.fromCharCode(65+i)}.</span> ${optionHtml}
         </div>`;
     });
     document.getElementById('options').innerHTML = html;
+    typesetQuizMath();
 
     highlightNav();
     updateButtonStates();
     updateMarkButton();
 }
 
-function selectOption(i) {
-    if (optionSelected || answers[index] !== null || timedOutQuestions[index]) return;
+function typesetQuizMath() {
+    const nodes = [
+        document.getElementById('qText'),
+        document.getElementById('options')
+    ].filter(Boolean);
 
+    if (!nodes.length) return;
+
+    if (window.MathJax && typeof window.MathJax.typesetPromise === 'function') {
+        if (typeof window.MathJax.typesetClear === 'function') {
+            window.MathJax.typesetClear(nodes);
+        }
+        window.MathJax.typesetPromise(nodes).catch((error) => {
+            console.warn('MathJax could not render quiz math:', error);
+        });
+        return;
+    }
+
+    window.setTimeout(() => {
+        if (window.MathJax && typeof window.MathJax.typesetPromise === 'function') {
+            typesetQuizMath();
+        }
+    }, 250);
+}
+
+function selectOption(i) {
+    if (timedOutQuestions[index]) return;
+
+    const hadAnswer = answers[index] !== null;
     answers[index] = i;
     if (resumeAnswerLockIndex === index) resumeAnswerLockIndex = -1;
     optionSelected = true;
     clearQuestionAdvanceTimeout();
-    const questionElapsedMs = questionResumeCarryMs + (currentQuestionStartedAt ? Math.max(0, Date.now() - currentQuestionStartedAt) : 0);
-    const secondsTaken = Number((questionElapsedMs / 1000).toFixed(1));
-    if (!cheatLog) cheatLog = createEmptyCheatLog();
-    cheatLog.questionTimes.push({
-        questionNumber: index + 1,
-        secondsTaken,
-        answered: true,
-        correct: null
-    });
-    if (secondsTaken <= RAPID_ANSWER_SECONDS_THRESHOLD) cheatLog.rapidAnswerCount++;
-    questionResumeCarryMs = 0;
-    currentQuestionStartedAt = 0;
 
-    // Lock the selected answer and wait for the user to click Next.
+    if (!hadAnswer) {
+        const questionElapsedMs = questionResumeCarryMs + (currentQuestionStartedAt ? Math.max(0, Date.now() - currentQuestionStartedAt) : 0);
+        const secondsTaken = Number((questionElapsedMs / 1000).toFixed(1));
+        if (!cheatLog) cheatLog = createEmptyCheatLog();
+        cheatLog.questionTimes.push({
+            questionNumber: index + 1,
+            secondsTaken,
+            answered: true,
+            correct: null
+        });
+        if (secondsTaken <= RAPID_ANSWER_SECONDS_THRESHOLD) cheatLog.rapidAnswerCount++;
+        questionResumeCarryMs = 0;
+    }
+
     const opts = document.querySelectorAll('.option');
     opts.forEach((optEl, optIndex) => {
         optEl.classList.toggle('selected', optIndex === i);
-        if (optIndex !== i) optEl.classList.add('disabled');
+        optEl.classList.remove('disabled');
     });
     if (opts[i]) opts[i].style.animation = 'bounceIn 0.5s ease';
 
@@ -4271,6 +6461,7 @@ function selectOption(i) {
     highlightNav();
     updateButtonStates();
     updatePauseButtonState();
+    saveCurrentTestProgress();
 }
 
 function createConfetti() {
@@ -4328,6 +6519,7 @@ function lockCurrentQuestionOnTimeout() {
         answered: false,
         correct: null
     });
+    saveCurrentTestProgress();
 }
 
 function clearQuestionAdvanceTimeout() {
@@ -4338,39 +6530,7 @@ function clearQuestionAdvanceTimeout() {
     updatePauseButtonState();
 }
 
-function canPauseTestNow() {
-    return Boolean(
-        currentChapter
-        && (answers[index] !== null || timedOutQuestions[index])
-        && index < qList.length - 1
-    );
-}
-
 function updatePauseButtonState() {
-    const pauseBtn = document.getElementById('pause-test-btn');
-    if (!pauseBtn) return;
-
-    const canPause = canPauseTestNow();
-    pauseBtn.disabled = !canPause;
-    pauseBtn.title = canPause
-        ? 'Pause now and resume from the next question.'
-        : 'Pause is available after the current question is answered.';
-}
-
-function getResumeAnswerLockIndex() {
-    if (resumeAnswerLockIndex < 0) return -1;
-    if (answers[resumeAnswerLockIndex] !== null || timedOutQuestions[resumeAnswerLockIndex]) {
-        resumeAnswerLockIndex = -1;
-    }
-    return resumeAnswerLockIndex;
-}
-
-function mustAnswerResumedQuestion() {
-    return getResumeAnswerLockIndex() === index;
-}
-
-function showResumeAnswerLockMessage() {
-    showPointsNotification('Answer the resumed question first to continue.', 'points-lost');
 }
 
 function restorePreTestState() {
@@ -4404,7 +6564,10 @@ function saveCurrentTestProgress(options = {}) {
         ? 0
         : questionResumeCarryMs + currentQuestionElapsedMs;
 
-    pausedTestState = {
+    setPausedTestState({
+        questionBankVersion: QUESTION_BANK_CLIENT_VERSION,
+        ownerId: getPausedTestStorageOwner(),
+        savedAt: Date.now(),
         chapter: currentChapter,
         partNumber: currentPartNumber,
         partLabel: currentPartLabel,
@@ -4421,6 +6584,8 @@ function saveCurrentTestProgress(options = {}) {
         liveDemoWalletBalance,
         time: pausedTime,
         totalPoints,
+        testsCompleted,
+        totalTimeSpent,
         totalCorrectAnswers,
         totalQuestionsAttempted,
         elapsedTimeBeforePauseMs: elapsedTimeBeforePauseMs + elapsedThisRun,
@@ -4429,11 +6594,17 @@ function saveCurrentTestProgress(options = {}) {
         testStartSnapshot: {
             ...testStartSnapshot
         }
-    };
+    });
+    lastProgressAutosaveAt = Date.now();
 }
 
 function resumePausedTest() {
     if (!pausedTestState) return;
+    if (!isPausedTestStateCurrent(pausedTestState)) {
+        setPausedTestState(null);
+        goHome();
+        return;
+    }
 
     clearInterval(timer);
     clearQuestionAdvanceTimeout();
@@ -4450,7 +6621,7 @@ function resumePausedTest() {
     currentQuizSeed      = String(pausedTestState.quizSeed || '');
     if (!currentQuizAttemptId) {
         alert('This paused test must be restarted because it was not issued by the backend.');
-        pausedTestState = null;
+        setPausedTestState(null);
         goHome();
         return;
     }
@@ -4468,6 +6639,8 @@ function resumePausedTest() {
     time                 = Number(pausedTestState.time || QUIZ_TOTAL_SECONDS);
     quizTimerEndsAt      = 0;
     totalPoints          = pausedTestState.totalPoints || 0;
+    testsCompleted       = pausedTestState.testsCompleted || testsCompleted;
+    totalTimeSpent       = pausedTestState.totalTimeSpent || totalTimeSpent;
     totalCorrectAnswers  = pausedTestState.totalCorrectAnswers || 0;
     totalQuestionsAttempted = pausedTestState.totalQuestionsAttempted || 0;
     elapsedTimeBeforePauseMs = pausedTestState.elapsedTimeBeforePauseMs || 0;
@@ -4475,10 +6648,10 @@ function resumePausedTest() {
     cheatLog             = cloneCheatLog(pausedTestState.cheatLog);
     cheatLog.resumeCount++;
     fullscreenWarningGiven = Number(cheatLog.fullscreenExitCount || 0) > 0;
-    resumeAnswerLockIndex = answers[index] === null && !timedOutQuestions[index] ? index : -1;
+    resumeAnswerLockIndex = -1;
     testStartSnapshot    = pausedTestState.testStartSnapshot || null;
     startTime            = Date.now();
-    pausedTestState      = null;
+    setPausedTestState(null);
 
     home.style.display   = 'none';
     quiz.style.display   = 'block';
@@ -4486,7 +6659,7 @@ function resumePausedTest() {
     setHomeSidebarButtonVisible(false);
     scrollToPageTop();
 
-    document.getElementById('chapter-title').innerText   = `${currentChapter} - ${currentPartLabel}`;
+    document.getElementById('chapter-title').innerText   = `${getChapterDisplayName(currentChapter)} - ${currentPartLabel}`;
     document.getElementById('total-questions').innerText = qList.length;
 
     const badge = document.getElementById('difficulty-badge');
@@ -4501,63 +6674,46 @@ function resumePausedTest() {
     updateWallet();
     updateDashboard();
     updatePauseButtonState();
-    if (resumeAnswerLockIndex === index) {
-        showResumeAnswerLockMessage();
-    }
+    saveCurrentTestProgress();
 }
 
 function nextQ() {
-    if (mustAnswerResumedQuestion()) {
-        showResumeAnswerLockMessage();
-        return;
-    }
     if (index < qList.length - 1) {
-        recordSkippedCurrentQuestion();
         questionResumeCarryMs = 0;
         currentQuestionStartedAt = 0;
         index++;
         optionSelected = false;
         loadQ(); startTimer();
         updatePauseButtonState();
+        saveCurrentTestProgress();
     }
 }
 
 function prevQ() {
-    showSequentialQuestionMessage();
-}
-
-function recordSkippedCurrentQuestion() {
-    if (answers[index] !== null || timedOutQuestions[index]) return;
-
-    const questionElapsedMs = questionResumeCarryMs + (currentQuestionStartedAt ? Math.max(0, Date.now() - currentQuestionStartedAt) : 0);
-    const secondsTaken = Number((questionElapsedMs / 1000).toFixed(1));
-
-    if (!cheatLog) cheatLog = createEmptyCheatLog();
-    cheatLog.questionTimes.push({
-        questionNumber: index + 1,
-        secondsTaken,
-        answered: false,
-        correct: null
-    });
-}
-
-function showSequentialQuestionMessage() {
-    showPointsNotification('You cannot return to previous questions or jump ahead. Continue in order.', 'points-lost');
+    if (index > 0) {
+        questionResumeCarryMs = 0;
+        currentQuestionStartedAt = 0;
+        index--;
+        optionSelected = answers[index] !== null;
+        loadQ();
+        startTimer();
+        updatePauseButtonState();
+        saveCurrentTestProgress();
+    }
 }
 
 function updateButtonStates() {
     const prev = document.getElementById('prev-btn');
     const next = document.getElementById('next-btn');
-    const navigationLocked = mustAnswerResumedQuestion();
     if (prev) {
-        prev.disabled = true;
-        prev.title = 'Sequential mode is on. You cannot go back to previous questions.';
+        prev.disabled = index <= 0;
+        prev.title = index > 0 ? 'Go to the previous question.' : 'This is the first question.';
     }
     if (next) {
-        const canContinue = index < qList.length - 1 && !navigationLocked;
+        const canContinue = index < qList.length - 1;
         next.disabled = !canContinue;
         next.title = canContinue
-            ? 'Continue to the next question. Unanswered questions cannot be attempted later.'
+            ? 'Go to the next question.'
             : 'This is the last question.';
     }
 }
@@ -4566,6 +6722,7 @@ function markQuestion() {
     marked[index] = !marked[index];
     updateMarkButton();
     highlightNav();
+    saveCurrentTestProgress();
     const btn = document.getElementById('mark-btn');
     if (btn) { btn.style.animation = 'bounceIn 0.4s ease'; setTimeout(() => btn.style.animation='', 400); }
 }
@@ -4583,19 +6740,23 @@ function buildNav() {
         let cls = 'nav-btn';
         if (i === index)    cls += ' current';
         if (answers[i] !== null || timedOutQuestions[i]) cls += ' answered';
-        if (i < index && answers[i] === null && !timedOutQuestions[i]) cls += ' skipped';
         if (marked[i])      cls += ' marked';
-        const disabledAttr = i === index ? '' : ' disabled';
-        html += `<button class="${cls}" onclick="goToQuestion(${i})"${disabledAttr}>${i+1}</button>`;
+        html += `<button class="${cls}" onclick="goToQuestion(${i})">${i+1}</button>`;
     }
     document.getElementById('nav').innerHTML = html;
 }
 
 function goToQuestion(i) {
-    if (i !== index) {
-        showSequentialQuestionMessage();
-        return;
-    }
+    const nextIndex = Number(i);
+    if (!Number.isInteger(nextIndex) || nextIndex < 0 || nextIndex >= qList.length || nextIndex === index) return;
+    questionResumeCarryMs = 0;
+    currentQuestionStartedAt = 0;
+    index = nextIndex;
+    optionSelected = answers[index] !== null;
+    loadQ();
+    startTimer();
+    updatePauseButtonState();
+    saveCurrentTestProgress();
 }
 
 function highlightNav() { buildNav(); }
@@ -4617,6 +6778,10 @@ function startTimer() {
     syncQuizTimeRemaining();
     updateTimerDisplay();
     updateProgress();
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+        handleOfflineDuringQuiz();
+        return;
+    }
     if (time <= 0) {
         submitTest({ silent: true });
         return;
@@ -4625,6 +6790,12 @@ function startTimer() {
         syncQuizTimeRemaining();
         updateTimerDisplay();
         updateProgress();
+        saveCurrentTestProgressThrottled();
+        if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+            clearInterval(timer);
+            handleOfflineDuringQuiz();
+            return;
+        }
         if (time <= 10 && time > 0) playTickSound();
         if (time <= 0) {
             clearInterval(timer);
@@ -4648,6 +6819,17 @@ function updateProgress() {
     const max = DIFF_TIMES[currentDifficulty];
     const el  = document.getElementById('progress');
     if (el) el.style.width = `${((max - time) / max) * 100}%`;
+}
+
+function resetSubmittedQuizState() {
+    testStartSnapshot = null;
+    setPausedTestState(null);
+    elapsedTimeBeforePauseMs = 0;
+    cheatLog = null;
+    resumeAnswerLockIndex = -1;
+    currentQuestionStartedAt = 0;
+    questionResumeCarryMs = 0;
+    currentQuizAttemptId = '';
 }
 
 async function persistAttemptToCloud(attempt) {
@@ -4674,6 +6856,9 @@ async function persistAttemptToCloud(attempt) {
                 adminWithdrawalRequests = Array.isArray(response.adminDashboard.withdrawalRequests)
                     ? response.adminDashboard.withdrawalRequests.map((entry) => normalizeWithdrawalRequest(entry))
                     : adminWithdrawalRequests;
+                adminReferrals = Array.isArray(response.adminDashboard.referrals)
+                    ? response.adminDashboard.referrals.map((entry) => normalizeReferralRecord(entry))
+                    : adminReferrals;
                 adminLoadError = '';
                 renderAdminDashboard();
             }
@@ -4691,13 +6876,15 @@ async function persistAttemptToCloud(attempt) {
 async function submitTestWithBackendGrading(options = {}) {
     if (isSubmittingTest) return;
     isSubmittingTest = true;
-    const { silent = false, violationReason = '' } = options;
+    const { silent = false, violationReason = '', systemReason = '', queueOnFailure = false } = options;
+    let attempt = null;
 
     try {
         syncQuizTimeRemaining();
         clearInterval(timer);
         quizTimerEndsAt = 0;
         clearQuestionAdvanceTimeout();
+        clearHiddenViolationTimeout();
 
         quiz = document.getElementById('quiz');
         result = document.getElementById('result');
@@ -4739,8 +6926,14 @@ async function submitTestWithBackendGrading(options = {}) {
             total,
             timeSpent
         });
+        if (systemReason) {
+            finalizedCheatLog.reasons = Array.from(new Set([
+                ...(finalizedCheatLog.reasons || []),
+                systemReason
+            ]));
+        }
 
-        const attempt = {
+        attempt = {
             clientAttemptId: currentQuizAttemptId,
             chapter: currentChapter,
             partNumber: currentPartNumber,
@@ -4763,7 +6956,7 @@ async function submitTestWithBackendGrading(options = {}) {
             timeSpent,
             userId: currentUser?.uid || '',
             userName: currentUser?.name || 'Student',
-            userAvatar: currentUser?.avatar || 'ST',
+            userAvatar: getDisplayAvatar(currentUser?.avatar),
             cheatLog: finalizedCheatLog
         };
 
@@ -4821,31 +7014,36 @@ async function submitTestWithBackendGrading(options = {}) {
         const accuracy = Number(savedAttempt.accuracy || 0);
         sessionPoints = Number(savedAttempt.points || 0);
         recordAttemptLocally(savedAttempt);
+        if (savedAttempt.localOnly && !response?.profile) {
+            const startingPoints = Number(testStartSnapshot?.totalPoints || totalPoints || 0);
+            const startingTests = Number(testStartSnapshot?.testsCompleted || testsCompleted || 0);
+            const startingTime = Number(testStartSnapshot?.totalTimeSpent || totalTimeSpent || 0);
+            const startingCorrect = Number(testStartSnapshot?.totalCorrectAnswers || totalCorrectAnswers || 0);
+            const startingAttempted = Number(testStartSnapshot?.totalQuestionsAttempted || totalQuestionsAttempted || 0);
+            totalPoints = Math.max(0, startingPoints + sessionPoints);
+            testsCompleted = startingTests + 1;
+            totalTimeSpent = startingTime + Number(savedAttempt.timeSpent || 0);
+            totalCorrectAnswers = startingCorrect + score;
+            totalQuestionsAttempted = startingAttempted + Number(savedAttempt.attemptedCount || 0);
+        }
 
-        testStartSnapshot = null;
-        pausedTestState = null;
-        elapsedTimeBeforePauseMs = 0;
-        cheatLog = null;
-        resumeAnswerLockIndex = -1;
-        currentQuestionStartedAt = 0;
-        questionResumeCarryMs = 0;
-        currentQuizAttemptId = '';
+        resetSubmittedQuizState();
 
         const displayedCashEarned = getCashEarnedDisplayValue(totalPoints);
         document.getElementById('score-display').innerHTML = `
             ${violationReason ? `
             <div style="margin-bottom:1rem;padding:0.9rem 1rem;border-radius:14px;background:rgba(239,68,68,0.16);border:1px solid rgba(248,113,113,0.5);color:#fecaca;font-weight:700;">
-                Test auto-submitted because ${escapeHtml(violationReason)} was detected. Cash earned reset to 0.
+                Test auto-submitted because ${escapeHtml(violationReason)} was detected. This quiz reward was cancelled; your existing wallet balance was not reset.
             </div>` : ''}
-            <h3>Chapter: ${escapeHtml(currentChapter)}</h3>
+            <h3>Chapter: ${escapeHtml(getChapterDisplayName(currentChapter))}</h3>
             <h3 style="color:var(--text-secondary);font-size:1rem;">${escapeHtml(getAttemptLabel())}</h3>
             <div class="score-display">${score}/${serverTotal}</div>
             <div style="font-size:1.1rem;color:var(--text-secondary);">
                 Accuracy: ${accuracy}% &nbsp;|&nbsp; Time: ${Math.floor(savedAttempt.timeSpent / 60)}m ${savedAttempt.timeSpent % 60}s
             </div>
-            <h3 style="color:var(--success);margin-top:1rem;">Cash Earned This Test: ${sessionPoints}</h3>
+            <h3 style="color:var(--success);margin-top:1rem;">Wallet Added This Test: ${sessionPoints}</h3>
             <div style="font-size:1rem;color:var(--text-secondary);margin-top:0.5rem;">
-                Current Cash Earned: ${displayedCashEarned}
+                Current Wallet: ${displayedCashEarned}
             </div>
             <div class="recording-upload-summary">
                 <strong>Recording Upload</strong>
@@ -4871,7 +7069,7 @@ async function submitTestWithBackendGrading(options = {}) {
                 <div style="font-weight:700;margin-bottom:0.4rem;">Final Test Summary</div>
                 <div style="color:var(--text-secondary);line-height:1.7;">
                     Correct: ${score} &nbsp;|&nbsp; Incorrect: ${incorrectCount} &nbsp;|&nbsp; Timed Out: ${savedTimedOutCount} &nbsp;|&nbsp; Not Attempted: ${unattemptedCount}<br>
-                    Cash Earned This Test: ${sessionPoints} &nbsp;|&nbsp; Current Cash Earned: ${displayedCashEarned}
+                    Wallet Added This Test: ${sessionPoints} &nbsp;|&nbsp; Current Wallet: ${displayedCashEarned}
                 </div>
             </div>
         `;
@@ -4889,8 +7087,8 @@ async function submitTestWithBackendGrading(options = {}) {
                     <p><strong>Status:</strong> <span style="color:${statusColor};">${escapeHtml(item.statusLabel || 'Not Attempted')}</span></p>
                     <p>Your answer: <strong>${escapeHtml(item.userAnswer || 'Not attempted')}</strong></p>
                     <p>Correct answer: <strong style="color:var(--success)">${escapeHtml(item.correctAnswer || '')}</strong></p>
-                    <p><strong>Cash Earned:</strong> <span style="color:${item.pointsColor || 'var(--text-secondary)'};">${escapeHtml(item.pointsLabel || 'No cash earned.')}</span></p>
-                    <p><strong>Running Cash Earned:</strong> ${Number(item.runningReviewPoints || 0)}</p>
+                    <p><strong>Wallet:</strong> <span style="color:${item.pointsColor || 'var(--text-secondary)'};">${escapeHtml(item.pointsLabel || 'No points earned.')}</span></p>
+                    <p><strong>Running Wallet:</strong> ${Number(item.runningReviewPoints || 0)}</p>
                     <div class="solution"><strong>Solution:</strong><br>${escapeHtml(item.solution || '')}</div>
                     ${item.marked ? '<p style="color:var(--warning);margin-top:0.5rem;"><i class="fas fa-bookmark"></i> Marked for review</p>' : ''}
                 </div>`;
@@ -4904,6 +7102,18 @@ async function submitTestWithBackendGrading(options = {}) {
         renderAdminDashboard();
     } catch (error) {
         console.error('Failed to submit test with backend grading:', error);
+        if (queueOnFailure && attempt && isLikelyOfflineError(error)) {
+            savePendingOfflineAttempt(attempt, systemReason || OFFLINE_AUTOSUBMIT_REASON);
+            recordAttemptLocally({
+                ...attempt,
+                localOnly: true,
+                pendingSync: true
+            });
+            resetSubmittedQuizState();
+            renderPendingOfflineSubmission(attempt, systemReason || OFFLINE_AUTOSUBMIT_REASON);
+            showPointsNotification('Quiz saved. It will sync when internet returns.', 'points-lost');
+            return;
+        }
         const scoreDisplay = document.getElementById('score-display');
         if (scoreDisplay) {
             scoreDisplay.innerHTML = `
@@ -4927,6 +7137,7 @@ async function submitTest(options = {}) {
     clearInterval(timer);
     quizTimerEndsAt = 0;
     clearQuestionAdvanceTimeout();
+    clearHiddenViolationTimeout();
     const recordingBlob = await stopRecording();
     stopCamera();
     if (!silent) playVictorySound();
@@ -4958,7 +7169,7 @@ async function submitTest(options = {}) {
     testsCompleted++;
     sessionPoints = violationReason ? 0 : Number(gradeResult.points || 0);
     const startingPoints = Number(testStartSnapshot?.totalPoints || totalPoints || 0);
-    totalPoints = violationReason ? 0 : Math.max(0, startingPoints + sessionPoints);
+    totalPoints = Math.max(0, startingPoints + sessionPoints);
     totalCorrectAnswers = Number(testStartSnapshot?.totalCorrectAnswers || totalCorrectAnswers || 0) + score;
     totalQuestionsAttempted = Number(testStartSnapshot?.totalQuestionsAttempted || totalQuestionsAttempted || 0) + attemptedCount;
 
@@ -4991,13 +7202,13 @@ async function submitTest(options = {}) {
         timeSpent,
         userId: currentUser?.uid || '',
         userName: currentUser?.name || 'Student',
-        userAvatar: currentUser?.avatar || '??',
+        userAvatar: getDisplayAvatar(currentUser?.avatar),
         cheatLog: finalizedCheatLog
     };
 
     const displayedCashEarned = getCashEarnedDisplayValue(totalPoints);
     testStartSnapshot = null;
-    pausedTestState = null;
+    setPausedTestState(null);
     elapsedTimeBeforePauseMs = 0;
     cheatLog = null;
     resumeAnswerLockIndex = -1;
@@ -5014,17 +7225,17 @@ async function submitTest(options = {}) {
     document.getElementById('score-display').innerHTML = `
         ${violationReason ? `
         <div style="margin-bottom:1rem;padding:0.9rem 1rem;border-radius:14px;background:rgba(239,68,68,0.16);border:1px solid rgba(248,113,113,0.5);color:#fecaca;font-weight:700;">
-            Test auto-submitted because ${escapeHtml(violationReason)} was detected. Cash earned reset to 0.
+            Test auto-submitted because ${escapeHtml(violationReason)} was detected. This quiz reward was cancelled; your existing wallet balance was not reset.
         </div>` : ''}
-        <h3>Chapter: ${currentChapter}</h3>
+        <h3>Chapter: ${escapeHtml(getChapterDisplayName(currentChapter))}</h3>
         <h3 style="color:var(--text-secondary);font-size:1rem;">${escapeHtml(getAttemptLabel())}</h3>
         <div class="score-display">${score}/${total}</div>
         <div style="font-size:1.1rem;color:var(--text-secondary);">
             Accuracy: ${accuracy}% &nbsp;|&nbsp; Time: ${Math.floor(timeSpent/60)}m ${timeSpent%60}s
         </div>
-        <h3 style="color:var(--success);margin-top:1rem;">Cash Earned This Test: ${sessionPoints}</h3>
+        <h3 style="color:var(--success);margin-top:1rem;">Wallet Added This Test: ${sessionPoints}</h3>
         <div style="font-size:1rem;color:var(--text-secondary);margin-top:0.5rem;">
-            Current Cash Earned: ${displayedCashEarned}
+            Current Wallet: ${displayedCashEarned}
         </div>
         <div class="recording-upload-summary">
             <strong>Recording Upload</strong>
@@ -5050,7 +7261,7 @@ async function submitTest(options = {}) {
             <div style="font-weight:700;margin-bottom:0.4rem;">Final Test Summary</div>
             <div style="color:var(--text-secondary);line-height:1.7;">
                 Correct: ${score} &nbsp;|&nbsp; Incorrect: ${incorrectCount} &nbsp;|&nbsp; Timed Out: ${timedOutCount} &nbsp;|&nbsp; Not Attempted: ${unattemptedCount}<br>
-                Cash Earned This Test: ${sessionPoints} &nbsp;|&nbsp; Current Cash Earned: ${displayedCashEarned}
+                Wallet Added This Test: ${sessionPoints} &nbsp;|&nbsp; Current Wallet: ${displayedCashEarned}
             </div>
         </div>
     `;
@@ -5068,8 +7279,8 @@ async function submitTest(options = {}) {
                 <p><strong>Status:</strong> <span style="color:${statusColor};">${escapeHtml(item.statusLabel || 'Not Attempted')}</span></p>
                 <p>Your answer: <strong>${escapeHtml(item.userAnswer || 'Not attempted')}</strong></p>
                 <p>Correct answer: <strong style="color:var(--success)">${escapeHtml(item.correctAnswer || '')}</strong></p>
-                <p><strong>Cash Earned:</strong> <span style="color:${item.pointsColor || 'var(--text-secondary)'};">${escapeHtml(item.pointsLabel || 'No cash earned.')}</span></p>
-                <p><strong>Running Cash Earned:</strong> ${Number(item.runningReviewPoints || 0)}</p>
+                <p><strong>Wallet:</strong> <span style="color:${item.pointsColor || 'var(--text-secondary)'};">${escapeHtml(item.pointsLabel || 'No points earned.')}</span></p>
+                <p><strong>Running Wallet:</strong> ${Number(item.runningReviewPoints || 0)}</p>
                 <div class="solution"><strong>Solution:</strong><br>${escapeHtml(item.solution || '')}</div>
                 ${item.marked ? '<p style="color:var(--warning);margin-top:0.5rem;"><i class="fas fa-bookmark"></i> Marked for review</p>' : ''}
             </div>`;
@@ -5111,25 +7322,11 @@ async function submitTest(options = {}) {
     }
 }
 
-function goHomeEarly() {
-    if (!canPauseTestNow()) {
-        showPointsNotification('Pause is available after the current question is answered.', 'points-lost');
-        return;
-    }
-
-    if (confirm('Return to chapters? Your test will resume from the next question.')) {
-        clearInterval(timer);
-        clearQuestionAdvanceTimeout();
-        saveCurrentTestProgress({ resumeAtNextQuestion: true });
-        restorePreTestState();
-        goHome();
-    }
-}
-
 function goHome() {
     clearInterval(timer);
     quizTimerEndsAt = 0;
     clearQuestionAdvanceTimeout();
+    clearHiddenViolationTimeout();
     home   = document.getElementById('home');
     quiz   = document.getElementById('quiz');
     result = document.getElementById('result');

@@ -13,7 +13,19 @@
 <link rel="preconnect" href="https://www.gstatic.com">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
 <script defer src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
-<link rel="stylesheet" href="styles.css"/>
+<script>
+  window.MathJax = {
+    tex: {
+      inlineMath: [['$', '$'], ['\\(', '\\)']],
+      displayMath: [['$$', '$$'], ['\\[', '\\]']],
+      processEscapes: true
+    },
+    svg: { fontCache: 'global' },
+    startup: { typeset: false }
+  };
+</script>
+<script defer src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js"></script>
+<link rel="stylesheet" href="styles.css?v=20260604-once-only-v1"/>
 </head>
 <body class="dark">
 
@@ -27,6 +39,7 @@
       <div class="login-icon"><i class="fas fa-calculator"></i></div>
       <h1>LearnLoot</h1>
       <p>The EarnLearn Platform</p>
+      <p class="login-tagline">Learn. Solve. Earn . Growww.</p>
     </div>
     <div class="avatar-section">
       <p class="avatar-label">Choose your avatar</p>
@@ -39,11 +52,17 @@
         onkeydown="if(event.key==='Enter') signInWithEmail()"/>
       <input type="password" id="password-input" placeholder="Enter your password..." class="name-input"
         onkeydown="if(event.key==='Enter') signInWithEmail()"/>
+      <input type="text" id="referral-input" placeholder="Referral code (optional)" maxlength="20" class="name-input"
+        oninput="handleReferralInputChange()"/>
+      <p class="referral-status" id="referral-status"></p>
       <button class="btn btn-primary btn-lg" onclick="createAccount()">
         <i class="fas fa-user-plus"></i> Create Account
       </button>
       <button class="btn btn-secondary btn-lg" onclick="signInWithEmail()">
         <i class="fas fa-envelope"></i> Sign In with Email
+      </button>
+      <button class="btn btn-google btn-lg" onclick="signInWithGoogle()" type="button">
+        <i class="fab fa-google"></i> Continue with Google
       </button>
       <button class="auth-link-button" onclick="sendPasswordReset()" type="button">
         Forgot password?
@@ -71,7 +90,7 @@
     </div>
     <div class="header-right">
       <div class="user-profile-pill" id="user-profile" onclick="showProfileOptions()">
-        <span id="user-avatar-display">ST</span>
+        <span id="user-avatar-display">🎓</span>
         <span id="user-name-display">Guest</span>
       </div>
       <button class="withdraw-btn" id="withdraw-btn" type="button" onclick="openWithdrawModal()">
@@ -80,7 +99,7 @@
       </button>
       <div class="wallet">
         <i class="fas fa-coins"></i>
-        <span>Cash Earned: <span id="points">0</span></span>
+        <span>Wallet: <span id="points">0</span></span>
       </div>
     </div>
   </div>
@@ -150,7 +169,7 @@
 <aside class="home-sidebar" id="home-sidebar" aria-hidden="true">
   <div class="home-sidebar-header">
     <div class="home-sidebar-user">
-      <div class="home-sidebar-avatar" id="home-sidebar-avatar">ST</div>
+      <div class="home-sidebar-avatar" id="home-sidebar-avatar">🎓</div>
       <div>
         <h3 id="home-sidebar-name">Student</h3>
         <p id="home-sidebar-email">Signed in</p>
@@ -186,6 +205,10 @@
       <i class="fas fa-file-contract"></i>
       <span>Terms of Use</span>
     </button>
+    <button class="home-sidebar-link" data-sidebar-section="refund-policy" onclick="openHomeSidebarSection('refund-policy')">
+      <i class="fas fa-receipt"></i>
+      <span>Refund Policy</span>
+    </button>
   </nav>
 </aside>
 
@@ -210,13 +233,17 @@
   <div class="dashboard">
     <div class="welcome-row">
       <div class="welcome-left">
-        <div class="welcome-avatar" id="welcome-avatar">ST</div>
+        <div class="welcome-avatar" id="welcome-avatar">🎓</div>
         <div>
           <h2 id="welcome-name">Welcome!</h2>
           <p id="welcome-sub" style="color:var(--text-secondary)">Ready to master JEE Maths today?</p>
+          <h2 class="home-tagline">Learn. Solve. Earn . Growww.</h2>
         </div>
       </div>
       <div class="welcome-actions">
+        <button class="btn btn-success btn-sm" id="refer-earn-btn" onclick="openReferralCard()" type="button">
+          <i class="fas fa-user-plus"></i> Refer & Earn
+        </button>
         <button class="btn btn-secondary btn-sm" id="admin-toggle-btn" onclick="toggleAdminPanel()" style="display:none">
           <i class="fas fa-shield-halved"></i> Admin Dashboard
         </button>
@@ -229,7 +256,7 @@
       </div>
       <div class="stat-card">
         <div class="stat-number" id="total-points-display">0</div>
-        <div>Cash Earned</div>
+        <div>Wallet</div>
       </div>
       <div class="stat-card">
         <div class="stat-number" id="accuracy-display">0%</div>
@@ -240,6 +267,25 @@
         <div>Time Spent</div>
       </div>
     </div>
+  </div>
+
+  <div class="dashboard referral-dashboard" id="referral-card" style="display:none">
+    <div class="referral-header">
+      <div>
+        <span class="referral-kicker">Refer & Get 100</span>
+        <h2><i class="fas fa-gift"></i> Refer & Earn</h2>
+        <p>Invite friends to LearnLoot and earn 100 when they sign up with your code.</p>
+      </div>
+      <div class="referral-header-actions">
+        <button class="btn btn-primary btn-sm" onclick="copyReferralLink()" type="button">
+          <i class="fas fa-link"></i> Copy Link
+        </button>
+        <button class="btn btn-secondary btn-sm" onclick="closeReferralCard()" type="button">
+          <i class="fas fa-xmark"></i> Close
+        </button>
+      </div>
+    </div>
+    <div id="referral-content"></div>
   </div>
 
   <!-- Performance Charts -->
@@ -258,7 +304,7 @@
   </div>
 
   <!-- Chapters -->
-  <h2 class="text-center mb-3"><i class="fas fa-book-open"></i> Select a Chapter to Begin</h2>
+  <h2 class="text-center mb-3" id="chapter-section-title"><i class="fas fa-layer-group"></i> Choose Your Course</h2>
   <div class="chapter-grid" id="chapter-list"></div>
 
   <!-- Leaderboard -->
@@ -303,6 +349,11 @@
     <div class="admin-section">
       <h3>Withdrawal Requests</h3>
       <div id="admin-withdrawal-requests-list"></div>
+    </div>
+
+    <div class="admin-section">
+      <h3>Referral Records</h3>
+      <div id="admin-referrals-list"></div>
     </div>
 
     <div class="admin-section">
@@ -362,9 +413,6 @@
       <button class="btn btn-primary" onclick="nextQ()" id="next-btn">
         Next <i class="fas fa-arrow-right"></i>
       </button>
-      <button class="btn btn-danger" onclick="goHomeEarly()" id="pause-test-btn">
-        <i class="fas fa-home"></i>Pause Test
-      </button>
       <button class="btn btn-success" onclick="submitTest()" id="submit-btn">
         <i class="fas fa-paper-plane"></i>Submit Test
       </button>
@@ -392,18 +440,12 @@
         <li>Sit upright in a well-lit place before you begin.</li>
         <li>Your face, shoulders, upper body, and both hands must remain clearly visible in the camera frame.</li>
         <li>Keep only your solving paper or notebook and required writing tools with you.</li>
+        <li>When the camera opens, speak once near your microphone so LearnLoot can confirm audio is recording.</li>
         <li>Anything in your hand other than solving paper, notebook, or writing tools may be treated as cheating.</li>
         <li>Books, phones, hidden devices, extra notes, another person, or repeated suspicious movement may also be treated as cheating.</li>
-        <li>If cheating is suspected, the cash earned from this quiz may be marked invalid.</li>
+        <li>If cheating is suspected, the wallet rewards from this quiz may be marked invalid.</li>
       </ul>
-      <h3>Question Navigation Rules</h3>
-      <ul>
-        <li>Questions must be solved in order.</li>
-        <li>You may leave a question unanswered and move to the next question.</li>
-        <li>Once you move forward, you cannot return to the previous question or attempt it again.</li>
-        <li>Jumping directly to another question is disabled.</li>
-      </ul>
-      <p class="pre-quiz-agreement">By continuing, you confirm that you understand these recording and sequential quiz rules and agree to follow them for the full quiz.</p>
+      <p class="pre-quiz-agreement">By continuing, you confirm that you understand these recording and exam integrity rules and agree to follow them for the full quiz.</p>
     </div>
 
     <div class="pre-quiz-recording-actions">
@@ -414,6 +456,31 @@
         <i class="fas fa-check"></i> I Understand, Start Quiz
       </button>
     </div>
+  </div>
+</div>
+
+<div class="modal-overlay quiz-scoring-modal" id="quiz-scoring-modal" style="display:none" role="dialog" aria-modal="true" aria-labelledby="quiz-scoring-title">
+  <div class="modal-card quiz-scoring-card">
+    <div class="quiz-scoring-icon" aria-hidden="true">
+      <i class="fas fa-coins"></i>
+    </div>
+    <h2 id="quiz-scoring-title">Wallet Scoring</h2>
+    <p class="modal-subtitle">This rule applies to every attempted question in this quiz.</p>
+
+    <div class="quiz-scoring-rules" aria-label="Quiz scoring rules">
+      <div class="quiz-scoring-rule quiz-scoring-rule-correct">
+        <span id="quiz-scoring-correct-points">+50</span>
+        <p>for every correct answer</p>
+      </div>
+      <div class="quiz-scoring-rule quiz-scoring-rule-incorrect">
+        <span id="quiz-scoring-incorrect-points">-50</span>
+        <p>for every incorrect answer</p>
+      </div>
+    </div>
+
+    <button class="btn btn-primary quiz-scoring-start" id="quiz-scoring-start-btn" onclick="closeQuizScoringPopup()">
+      <i class="fas fa-play"></i> Start Answering
+    </button>
   </div>
 </div>
 
@@ -446,7 +513,7 @@
     <div class="leaderboard">
       <h3><i class="fas fa-chart-line"></i> Your Progress Summary</h3>
       <div class="leaderboard-item">
-        <span>Cash Earned:</span>
+        <span>Wallet:</span>
         <span id="total-points">0</span>
       </div>
       <div class="leaderboard-item">
@@ -466,8 +533,8 @@
 <script defer src="https://www.gstatic.com/firebasejs/12.12.1/firebase-storage-compat.js"></script>
 <script defer src="https://www.gstatic.com/firebasejs/12.12.1/firebase-functions-compat.js"></script>
 <script defer src="https://www.gstatic.com/firebasejs/12.12.1/firebase-app-check-compat.js"></script>
-<script defer src="firebase-config.js"></script>
-<script src="script.js?v=20260514-cash-feedback" defer></script>
+<script defer src="firebase-config.js?v=20260605-local-backend-default-v1"></script>
+<script src="script.js?v=20260605-firebase-users-referrals-v11" defer></script>
 <script defer>
   (function hardenBackendCalls() {
     function getAppCheckConfig() {

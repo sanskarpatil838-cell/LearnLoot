@@ -32,6 +32,14 @@ service firebase.storage {
       && request.resource != null
       && fileName.matches('chunk_[0-9]{4}\\.webm')
       && request.resource.size < 20 * 1024 * 1024
-      && request.resource.contentType.matches('video/webm.*');
+      && isWebmRecording(request.resource.contentType);
+  }
+
+  function isWebmRecording(contentType) {
+    return contentType is string
+      && (
+        contentType.matches('video/webm.*')
+        || contentType.matches('video/x-matroska.*')
+      );
   }
 }

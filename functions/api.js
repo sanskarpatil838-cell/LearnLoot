@@ -5,10 +5,12 @@ const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
 const crypto = require('crypto');
+const { normalizeMathSymbols, hasBrokenMathFragments, toReadableMathText } = require('./math-normalizer');
 
 const app = express();
 const MAX_ADMIN_USERS = Number(process.env.MAX_ADMIN_USERS || 200);
 const MAX_ADMIN_ATTEMPTS = Number(process.env.MAX_ADMIN_ATTEMPTS || 250);
+const MAX_LEADERBOARD_USERS = Number(process.env.MAX_LEADERBOARD_USERS || 10);
 const POINTS_PER_QUESTION = 50;
 const INCORRECT_POINTS_PENALTY = 50;
 const CHAPTER_PART_SIZE = Number(process.env.CHAPTER_PART_SIZE || 20);
@@ -29,7 +31,10 @@ const DEFAULT_CORS_ORIGINS = [
 ];
 const MIN_WITHDRAWAL_POINTS = Number(process.env.MIN_WITHDRAWAL_POINTS || 10000);
 const MAX_WITHDRAWAL_REQUESTS = Number(process.env.MAX_WITHDRAWAL_REQUESTS || 150);
+const REFERRAL_REWARD_POINTS = Number(process.env.REFERRAL_REWARD_POINTS || 100);
+const MAX_ADMIN_REFERRALS = Number(process.env.MAX_ADMIN_REFERRALS || 200);
 const WITHDRAWAL_STATUSES = new Set(['Pending', 'Approved', 'Rejected', 'Paid']);
+const WITHDRAWAL_DEDUCTION_STATUSES = new Set(['Approved', 'Paid']);
 const WITHDRAWAL_SUBMIT_COOLDOWN_MS = Number(process.env.WITHDRAWAL_SUBMIT_COOLDOWN_MS || 30 * 1000);
 const adminEmails = new Set(
   String(process.env.ADMIN_EMAILS || 'sanskarpatil838@gmail.com')
@@ -56,7 +61,7 @@ app.use((req, res, next) => {
 });
 
 app.use(cors({ origin: getAllowedOrigins(), credentials: true }));
-app.use(express.json({ limit: '1mb' }));
+app.use(express.json({ limit: '8mb' }));
 
 if (!admin.apps.length) {
   admin.initializeApp({
@@ -102,6 +107,67 @@ function sanitizeClientAttemptId(value) {
     .replace(/[^a-zA-Z0-9_-]/g, '-')
     .replace(/-+/g, '-')
     .replace(/^-|-$/g, '');
+}
+
+function sanitizeStorageSegment(value, fallback = 'item', maxLength = 160) {
+  const safeValue = String(value || fallback)
+    .trim()
+    .replace(/[^a-zA-Z0-9_-]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, maxLength);
+  return safeValue || fallback;
+}
+
+function getQuizPartAttemptKey(chapter, partNumber) {
+  const raw = `${clampText(chapter, 120)}::${Math.max(1, toInteger(partNumber, 1))}`;
+  return crypto.createHash('sha1').update(raw).digest('hex');
+}
+
+function normalizeReferralCode(value) {
+  return String(value || '')
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, '')
+    .slice(0, 20);
+}
+
+function createReferralCodeCandidate(decoded = {}, seed = {}) {
+  const source = seed.name || decoded.name || decoded.email || decoded.uid || 'USER';
+  const base = String(source)
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, '')
+    .slice(0, 7) || 'USER';
+  return normalizeReferralCode(`${base}${crypto.randomBytes(3).toString('hex').toUpperCase()}`).slice(0, 12);
+}
+
+async function createUniqueReferralCode(transaction, decoded = {}, seed = {}) {
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const candidate = createReferralCodeCandidate(decoded, seed);
+    const snapshot = await transaction.get(
+      db.collection('users').where('referralCode', '==', candidate).limit(1)
+    );
+    if (snapshot.empty || snapshot.docs.every((doc) => doc.id === decoded.uid)) {
+      return candidate;
+    }
+  }
+
+  throw createHttpError(500, 'Could not generate a unique referral code. Please try again.');
+}
+
+function getRequestClientInfo(req, seed = {}) {
+  const seedInfo = seed.clientInfo && typeof seed.clientInfo === 'object' ? seed.clientInfo : {};
+  return {
+    userAgent: clampText(req?.get?.('user-agent') || seedInfo.userAgent, 500),
+    ip: clampText(
+      req?.headers?.['x-forwarded-for'] || req?.ip || req?.socket?.remoteAddress || seedInfo.ip,
+      120
+    ),
+    language: clampText(seedInfo.language, 80),
+    platform: clampText(seedInfo.platform, 120),
+    screen: clampText(seedInfo.screen, 80),
+    timezone: clampText(seedInfo.timezone, 80)
+  };
 }
 
 function getHourBucket(nowMs = Date.now()) {
@@ -185,6 +251,14 @@ function getQuestionBankApi() {
   vm.createContext(sandbox);
   vm.runInContext(code, sandbox, { filename: questionBankPath });
 
+  ['jee-math-question-bank.js', 'physics-question-bank.js', 'chemistry-question-bank.js', 'jee-advanced-pyq-question-bank.js', 'mht-cet-jee-main-pyq-question-bank.js'].forEach((fileName) => {
+    const supplementalPath = path.resolve(__dirname, fileName);
+    if (fs.existsSync(supplementalPath)) {
+      const supplementalCode = fs.readFileSync(supplementalPath, 'utf8');
+      vm.runInContext(supplementalCode, sandbox, { filename: supplementalPath });
+    }
+  });
+
   if (
     typeof sandbox.getQuizQuestionsForAttempt !== 'function'
     || typeof sandbox.getQuizQuestionsByIds !== 'function'
@@ -193,6 +267,7 @@ function getQuestionBankApi() {
     || typeof sandbox.getChapterQuestionCount !== 'function'
     || typeof sandbox.getChapterPartCount !== 'function'
     || typeof sandbox.getChapterPartInfo !== 'function'
+    || typeof sandbox.getChapterPartSize !== 'function'
   ) {
     throw new Error('Question bank helpers are not available to the backend.');
   }
@@ -202,6 +277,7 @@ function getQuestionBankApi() {
     getChapterQuestionCount: sandbox.getChapterQuestionCount,
     getChapterPartCount: sandbox.getChapterPartCount,
     getChapterPartInfo: sandbox.getChapterPartInfo,
+    getChapterPartSize: sandbox.getChapterPartSize,
     getQuizQuestionsForAttempt: sandbox.getQuizQuestionsForAttempt,
     getQuizQuestionsByIds: sandbox.getQuizQuestionsByIds,
     gradeQuiz: sandbox.gradeQuiz
@@ -210,16 +286,43 @@ function getQuestionBankApi() {
 }
 
 function questionForClient(question, index) {
+  const exactPaperText = Boolean(question && question.exactPaperText);
+  const qHtml = question && question.qHtml
+    ? exactPaperText
+      ? clampText(question.qHtml, 10000)
+      : normalizeMathSymbols(clampText(question.qHtml, 10000))
+    : '';
+  const optionHtml = question && Array.isArray(question.oHtml)
+    ? question.oHtml.slice(0, 4).map((option) => exactPaperText
+      ? clampText(option, 3000)
+      : normalizeMathSymbols(clampText(option, 3000)))
+    : [];
+  const questionText = safeQuestionText(question && question.q, 6000);
+  const optionText = Array.isArray(question && question.o)
+    ? question.o.slice(0, 4).map((option) => safeQuestionText(option, 2000))
+    : [];
+
   const clientQuestion = {
     questionId: clampText(question && question.questionId, 120),
     questionNumber: index + 1,
-    q: clampText(question && question.q, 2000),
-    o: Array.isArray(question && question.o)
-      ? question.o.slice(0, 4).map((option) => clampText(option, 1000))
-      : []
+    q: questionText,
+    o: optionText
   };
 
+  if (qHtml && (exactPaperText || !hasBrokenMathFragments(qHtml))) {
+    clientQuestion.qHtml = qHtml;
+  }
+
+  if (optionHtml.length) {
+    clientQuestion.oHtml = optionHtml.map((option) => (exactPaperText || !hasBrokenMathFragments(option)) ? option : '');
+  }
+
   return clientQuestion;
+}
+
+function safeQuestionText(value, limit) {
+  const normalized = normalizeMathSymbols(clampText(value, limit));
+  return hasBrokenMathFragments(normalized) ? toReadableMathText(normalized) : normalized;
 }
 
 function createQuizSeed() {
@@ -254,7 +357,39 @@ function normalizeWithdrawalRequestDoc(doc) {
     requestDateTime: toInteger(data.requestDateTime || data.requestedAtMs),
     requestedAtMs: toInteger(data.requestedAtMs || data.requestDateTime),
     updatedAtMs: toInteger(data.updatedAtMs),
-    updatedBy: clampText(data.updatedBy, 160)
+    updatedBy: clampText(data.updatedBy, 160),
+    walletDeducted: Boolean(data.walletDeducted),
+    deductedPoints: toInteger(data.deductedPoints),
+    deductedAtMs: toInteger(data.deductedAtMs),
+    walletBalanceBeforeDeduction: toInteger(data.walletBalanceBeforeDeduction),
+    walletBalanceAfterDeduction: toInteger(data.walletBalanceAfterDeduction),
+    refundedPoints: toInteger(data.refundedPoints),
+    refundedAtMs: toInteger(data.refundedAtMs)
+  };
+}
+
+function normalizeReferralRecordDoc(doc, userMetaById = new Map()) {
+  const data = typeof doc.data === 'function' ? doc.data() || {} : doc || {};
+  const referrer = userMetaById.get(data.referrerUserId) || {};
+  const referred = userMetaById.get(data.referredUserId) || {};
+  return {
+    id: doc.id || data.id || '',
+    referrerUserId: clampText(data.referrerUserId, 160),
+    referrerEmail: clampText(data.referrerEmail || referrer.email, 160),
+    referrerName: clampText(data.referrerName || referrer.name, 80, 'Student'),
+    referredUserId: clampText(data.referredUserId, 160),
+    referredEmail: clampText(data.referredEmail || referred.email, 160),
+    referredName: clampText(data.referredName || referred.name, 80, 'Student'),
+    referralCode: normalizeReferralCode(data.referralCode),
+    status: clampText(data.status, 40, 'completed'),
+    rewardPoints: toInteger(data.rewardPoints, REFERRAL_REWARD_POINTS),
+    createdAtMs: toInteger(data.createdAtMs),
+    updatedAtMs: toInteger(data.updatedAtMs),
+    cancelledAtMs: toInteger(data.cancelledAtMs),
+    cancelledBy: clampText(data.cancelledBy, 160),
+    suspicious: Boolean(data.suspicious),
+    suspiciousReason: clampText(data.suspiciousReason, 240),
+    clientInfo: data.clientInfo && typeof data.clientInfo === 'object' ? data.clientInfo : {}
   };
 }
 
@@ -274,7 +409,7 @@ function getChapterCatalog() {
       name,
       totalQuestions,
       totalParts,
-      perPart: CHAPTER_PART_SIZE
+      perPart: bank.getChapterPartSize(name)
     };
   });
 }
@@ -404,17 +539,26 @@ function sanitizeAttempt(raw = {}, user, startingBalance = 0, issuedAttempt = nu
 
 function publicProfileFromDoc(uid, data = {}, decoded = null) {
   const email = decoded ? decoded.email || '' : data.email || '';
+  const totalPoints = toInteger(data.totalPoints ?? data.points);
+  const totalReferrals = toInteger(data.totalReferrals ?? data.numberOfReferrals ?? data.noOfReferrals);
   return {
     uid,
     name: data.name || (email ? email.split('@')[0] : 'Student'),
     avatar: data.avatar || 'ST',
     email,
     isAdmin: isAdminEmail(email),
-    totalPoints: toInteger(data.totalPoints),
+    totalPoints,
+    points: totalPoints,
     testsCompleted: toInteger(data.testsCompleted),
     totalTimeSpent: toNonNegativeNumber(data.totalTimeSpent),
     totalCorrectAnswers: toInteger(data.totalCorrectAnswers),
-    totalQuestionsAttempted: toInteger(data.totalQuestionsAttempted)
+    totalQuestionsAttempted: toInteger(data.totalQuestionsAttempted),
+    referralCode: normalizeReferralCode(data.referralCode),
+    referredBy: data.referredBy || '',
+    totalReferrals,
+    numberOfReferrals: totalReferrals,
+    noOfReferrals: totalReferrals,
+    referralPoints: toInteger(data.referralPoints)
   };
 }
 
@@ -426,7 +570,10 @@ function publicLeaderboardEntry(doc) {
     name: data.name || 'Student',
     avatar: data.avatar || 'ST',
     totalPoints: toInteger(data.totalPoints),
-    testsCompleted: toInteger(data.testsCompleted)
+    testsCompleted: toInteger(data.testsCompleted),
+    totalTimeSpent: toNonNegativeNumber(data.totalTimeSpent),
+    totalCorrectAnswers: toInteger(data.totalCorrectAnswers),
+    totalQuestionsAttempted: toInteger(data.totalQuestionsAttempted)
   };
 }
 
@@ -500,13 +647,22 @@ async function issueQuizAttempt(decoded, rawChapter, rawPartNumber = 1) {
   const expiresAtMs = nowMs + QUIZ_ATTEMPT_TTL_MS;
   const userRef = db.collection('users').doc(decoded.uid);
   const attemptRef = userRef.collection('quizSessions').doc(attemptId);
+  const quizKey = getQuizPartAttemptKey(payload.chapter, payload.partInfo.partNumber);
+  const completionRef = userRef.collection('quizCompletions').doc(quizKey);
   const hourBucket = getHourBucket(nowMs);
   const rateRef = userRef.collection('rateLimits').doc(`quiz-start-${hourBucket}`);
 
   await db.runTransaction(async (transaction) => {
-    const rateSnapshot = await transaction.get(rateRef);
+    const [rateSnapshot, completionSnapshot] = await Promise.all([
+      transaction.get(rateRef),
+      transaction.get(completionRef)
+    ]);
     const rateData = rateSnapshot.exists ? rateSnapshot.data() || {} : {};
     const startCount = toInteger(rateData.count);
+
+    if (completionSnapshot.exists) {
+      throw createHttpError(409, 'You have already attempted this quiz. Each quiz can be attempted only once.');
+    }
 
     if (startCount >= MAX_QUIZ_STARTS_PER_HOUR) {
       throw createHttpError(429, 'Too many quizzes started. Please wait before starting another one.');
@@ -526,6 +682,7 @@ async function issueQuizAttempt(decoded, rawChapter, rawPartNumber = 1) {
       chapter: payload.chapter,
       partNumber: payload.partInfo.partNumber,
       partLabel: payload.partInfo.label,
+      quizKey,
       quizSeed: payload.quizSeed,
       questionIds: payload.questionIds,
       questionCount: payload.questionIds.length,
@@ -584,38 +741,150 @@ async function findIssuedQuizSession(transaction, userRef, rawAttempt, clientAtt
   throw createHttpError(400, 'Start the quiz again before submitting. This attempt was not issued by the backend.');
 }
 
-async function ensureUserProfile(decoded, seed = {}) {
+async function ensureUserProfile(decoded, seed = {}, req = null) {
   const userRef = db.collection('users').doc(decoded.uid);
-  const snapshot = await userRef.get();
-  const existing = snapshot.exists ? snapshot.data() : {};
-  const seedName = clampText(seed.name, 60);
-  const seedAvatar = clampText(seed.avatar, 12);
-  const profile = {
-    uid: decoded.uid,
-    email: decoded.email || existing.email || '',
-    name: seedName || clampText(existing.name || decoded.name || (decoded.email || '').split('@')[0] || 'Student', 60),
-    avatar: seedAvatar || clampText(existing.avatar || 'ST', 12),
-    totalPoints: toInteger(existing.totalPoints),
-    testsCompleted: toInteger(existing.testsCompleted),
-    totalTimeSpent: toNonNegativeNumber(existing.totalTimeSpent),
-    totalCorrectAnswers: toInteger(existing.totalCorrectAnswers),
-    totalQuestionsAttempted: toInteger(existing.totalQuestionsAttempted),
-    updatedAt: serverTimestamp(),
-    lastLoginAt: serverTimestamp()
-  };
+  const incomingReferralCode = normalizeReferralCode(seed.referralCode || seed.referredBy || seed.ref);
 
-  if (!snapshot.exists) {
-    profile.createdAt = serverTimestamp();
+  const result = await db.runTransaction(async (transaction) => {
+    const snapshot = await transaction.get(userRef);
+    const existing = snapshot.exists ? snapshot.data() || {} : {};
+    const isNewProfile = !snapshot.exists;
+    const seedName = clampText(seed.name, 60);
+    const seedAvatar = clampText(seed.avatar, 12);
+    const existingReferralCode = normalizeReferralCode(existing.referralCode);
+    const referralCode = existingReferralCode || await createUniqueReferralCode(transaction, decoded, seed);
+    let referredBy = clampText(existing.referredBy, 160);
+    let referralReward = null;
+
+    if (isNewProfile && decoded.email) {
+      const emailSnapshot = await transaction.get(
+        db.collection('users').where('email', '==', decoded.email).limit(1)
+      );
+      const emailAlreadyUsed = emailSnapshot.docs.some((doc) => doc.id !== decoded.uid);
+      if (emailAlreadyUsed) {
+        throw createHttpError(409, 'An account with this email already exists.');
+      }
+    }
+
+    if (incomingReferralCode && isNewProfile) {
+      if (incomingReferralCode === referralCode) {
+        throw createHttpError(400, 'You cannot use your own referral code.');
+      }
+
+      const referrerSnapshot = await transaction.get(
+        db.collection('users').where('referralCode', '==', incomingReferralCode).limit(1)
+      );
+      if (referrerSnapshot.empty) {
+        throw createHttpError(400, 'Invalid referral code.');
+      }
+
+      const referrerDoc = referrerSnapshot.docs[0];
+      if (referrerDoc.id === decoded.uid) {
+        throw createHttpError(400, 'You cannot use your own referral code.');
+      }
+
+      const referralRef = db.collection('referrals').doc(`${referrerDoc.id}_${decoded.uid}`);
+      const existingReferralSnapshot = await transaction.get(referralRef);
+      if (existingReferralSnapshot.exists) {
+        throw createHttpError(409, 'Referral bonus already credited.');
+      }
+
+      const referrer = referrerDoc.data() || {};
+      const nowMs = Date.now();
+      const rewardPoints = REFERRAL_REWARD_POINTS;
+      const referralRecord = {
+        referrerUserId: referrerDoc.id,
+        referrerEmail: clampText(referrer.email, 160),
+        referrerName: clampText(referrer.name, 80, 'Student'),
+        referredUserId: decoded.uid,
+        referredEmail: decoded.email || '',
+        referredName: seedName || clampText(decoded.name || (decoded.email || '').split('@')[0] || 'Student', 80),
+        referralCode: incomingReferralCode,
+        status: 'completed',
+        rewardPoints,
+        createdAt: serverTimestamp(),
+        createdAtMs: nowMs,
+        updatedAt: serverTimestamp(),
+        updatedAtMs: nowMs,
+        suspicious: false,
+        suspiciousReason: '',
+        clientInfo: getRequestClientInfo(req, seed)
+      };
+
+      transaction.set(referralRef, referralRecord);
+      transaction.set(referrerDoc.ref.collection('pointsHistory').doc(), {
+        type: 'referral_bonus',
+        points: rewardPoints,
+        message: 'Referral bonus credited for inviting a new user',
+        referredUserId: decoded.uid,
+        referralId: referralRef.id,
+        createdAt: serverTimestamp(),
+        createdAtMs: nowMs
+      });
+      transaction.set(referrerDoc.ref, {
+        totalPoints: admin.firestore.FieldValue.increment(rewardPoints),
+        points: admin.firestore.FieldValue.increment(rewardPoints),
+        totalReferrals: admin.firestore.FieldValue.increment(1),
+        numberOfReferrals: admin.firestore.FieldValue.increment(1),
+        noOfReferrals: admin.firestore.FieldValue.increment(1),
+        referralPoints: admin.firestore.FieldValue.increment(rewardPoints),
+        updatedAt: serverTimestamp(),
+        lastReferralRewardAt: serverTimestamp()
+      }, { merge: true });
+
+      referredBy = referrerDoc.id;
+      referralReward = {
+        referralId: referralRef.id,
+        referralCode: incomingReferralCode,
+        referrerUserId: referrerDoc.id,
+        rewardPoints,
+        message: 'Referral code applied successfully.'
+      };
+    }
+
+    const totalPoints = toInteger(existing.totalPoints ?? existing.points);
+    const totalReferrals = toInteger(existing.totalReferrals ?? existing.numberOfReferrals ?? existing.noOfReferrals);
+    const profile = {
+      uid: decoded.uid,
+      email: decoded.email || existing.email || '',
+      name: seedName || clampText(existing.name || decoded.name || (decoded.email || '').split('@')[0] || 'Student', 60),
+      avatar: seedAvatar || clampText(existing.avatar || 'ST', 12),
+      totalPoints,
+      points: totalPoints,
+      referralCode,
+      referredBy,
+      totalReferrals,
+      numberOfReferrals: totalReferrals,
+      noOfReferrals: totalReferrals,
+      referralPoints: toInteger(existing.referralPoints),
+      testsCompleted: toInteger(existing.testsCompleted),
+      totalTimeSpent: toNonNegativeNumber(existing.totalTimeSpent),
+      totalCorrectAnswers: toInteger(existing.totalCorrectAnswers),
+      totalQuestionsAttempted: toInteger(existing.totalQuestionsAttempted),
+      updatedAt: serverTimestamp(),
+      lastLoginAt: serverTimestamp()
+    };
+
+    if (isNewProfile) {
+      profile.createdAt = serverTimestamp();
+    }
+
+    transaction.set(userRef, profile, { merge: true });
+    return { profile, referralReward };
+  });
+
+  const publicProfile = publicProfileFromDoc(decoded.uid, result.profile, decoded);
+  if (result.referralReward) {
+    publicProfile.referralApplied = true;
+    publicProfile.referralReward = result.referralReward;
   }
-
-  await userRef.set(profile, { merge: true });
-  return publicProfileFromDoc(decoded.uid, profile, decoded);
+  return publicProfile;
 }
 
 async function getLeaderboard() {
   const snapshot = await db.collection('users')
     .orderBy('totalPoints', 'desc')
-    .limit(10)
+    .limit(MAX_LEADERBOARD_USERS)
     .get();
 
   return snapshot.docs.map((doc) => ({
@@ -633,6 +902,46 @@ async function getUserAttempts(uid) {
   return snapshot.docs
     .map((doc) => normalizeAttemptForResponse(doc.data(), { uid }))
     .sort((a, b) => a.timestamp - b.timestamp);
+}
+
+async function validateReferralCode(code, currentUid = '') {
+  const referralCode = normalizeReferralCode(code);
+  if (!referralCode) {
+    throw createHttpError(400, 'Invalid referral code.');
+  }
+
+  const snapshot = await db.collection('users')
+    .where('referralCode', '==', referralCode)
+    .limit(1)
+    .get();
+
+  if (snapshot.empty) {
+    throw createHttpError(400, 'Invalid referral code.');
+  }
+
+  const ownerDoc = snapshot.docs[0];
+  if (currentUid && ownerDoc.id === currentUid) {
+    throw createHttpError(400, 'You cannot use your own referral code.');
+  }
+
+  const owner = ownerDoc.data() || {};
+  return {
+    valid: true,
+    referralCode,
+    referrerUserId: ownerDoc.id,
+    referrerName: clampText(owner.name, 80, 'Student')
+  };
+}
+
+async function getUserReferralHistory(uid) {
+  const snapshot = await db.collection('referrals')
+    .where('referrerUserId', '==', uid)
+    .limit(50)
+    .get();
+
+  return snapshot.docs
+    .map((doc) => normalizeReferralRecordDoc(doc))
+    .sort((a, b) => b.createdAtMs - a.createdAtMs);
 }
 
 function normalizeAdminAttemptDoc(doc, userMetaById) {
@@ -668,6 +977,15 @@ async function getAdminWithdrawalRequests() {
   return snapshot.docs.map((doc) => normalizeWithdrawalRequestDoc(doc));
 }
 
+async function getAdminReferralRecords(userMetaById = new Map()) {
+  const snapshot = await db.collection('referrals')
+    .orderBy('createdAtMs', 'desc')
+    .limit(MAX_ADMIN_REFERRALS)
+    .get();
+
+  return snapshot.docs.map((doc) => normalizeReferralRecordDoc(doc, userMetaById));
+}
+
 async function getAdminDashboardData() {
   const usersSnapshot = await db.collection('users')
     .orderBy('totalPoints', 'desc')
@@ -697,9 +1015,12 @@ async function getAdminDashboardData() {
     attempts = await getAdminAttemptsFromUsers(usersSnapshot, userMetaById);
   }
 
-  const withdrawalRequests = await getAdminWithdrawalRequests();
+  const [withdrawalRequests, referrals] = await Promise.all([
+    getAdminWithdrawalRequests(),
+    getAdminReferralRecords(userMetaById)
+  ]);
 
-  return { users, attempts, withdrawalRequests };
+  return { users, attempts, withdrawalRequests, referrals };
 }
 
 app.get('/health', (req, res) => {
@@ -708,7 +1029,7 @@ app.get('/health', (req, res) => {
 
 app.post('/api/profile', requireAuth, async (req, res, next) => {
   try {
-    const profile = await ensureUserProfile(req.auth, req.body || {});
+    const profile = await ensureUserProfile(req.auth, req.body || {}, req);
     res.json({ profile });
   } catch (error) {
     next(error);
@@ -717,13 +1038,22 @@ app.post('/api/profile', requireAuth, async (req, res, next) => {
 
 app.get('/api/me', requireAuth, async (req, res, next) => {
   try {
-    const profile = await ensureUserProfile(req.auth);
-    const [attempts, leaderboard] = await Promise.all([
+    const profile = await ensureUserProfile(req.auth, {}, req);
+    const [attempts, leaderboard, referralHistory] = await Promise.all([
       getUserAttempts(req.auth.uid),
-      getLeaderboard()
+      getLeaderboard(),
+      getUserReferralHistory(req.auth.uid)
     ]);
 
-    res.json({ profile, attempts, leaderboard });
+    res.json({ profile, attempts, leaderboard, referralHistory });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/referrals/validate', async (req, res, next) => {
+  try {
+    res.json(await validateReferralCode(req.query.code));
   } catch (error) {
     next(error);
   }
@@ -864,7 +1194,13 @@ app.post('/api/attempts', requireAuth, async (req, res, next) => {
         throw createHttpError(400, 'Submitted attempt does not match the issued quiz attempt.');
       }
       const attemptRef = userRef.collection('attempts').doc(backendAttemptId);
+      const quizKey = clampText(
+        issuedAttempt.quizKey || getQuizPartAttemptKey(issuedAttempt.chapter, issuedAttempt.partNumber),
+        80
+      );
+      const completionRef = userRef.collection('quizCompletions').doc(quizKey);
       const existingAttemptSnapshot = await transaction.get(attemptRef);
+      const completionSnapshot = await transaction.get(completionRef);
       const dailyRewardSnapshot = await transaction.get(dailyRewardRef);
       const latest = latestUserSnapshot.exists ? latestUserSnapshot.data() : {};
       const previousTotalPoints = toInteger(latest.totalPoints);
@@ -876,6 +1212,10 @@ app.post('/api/attempts', requireAuth, async (req, res, next) => {
         return latest;
       }
 
+      if (completionSnapshot.exists) {
+        throw createHttpError(409, 'You have already attempted this quiz. Each quiz can be attempted only once.');
+      }
+
       if (issuedAttempt.uid !== req.auth.uid || issuedAttempt.status !== 'issued') {
         throw createHttpError(409, 'This quiz attempt has already been used or is no longer valid.');
       }
@@ -885,21 +1225,19 @@ app.post('/api/attempts', requireAuth, async (req, res, next) => {
       }
 
       const { attempt, review } = sanitizeAttempt(rawAttempt, currentProfile, previousTotalPoints, issuedAttempt);
-      const resetPoints = Boolean(attempt.cheatLog && attempt.cheatLog.autoSubmitted);
-      const rawAttemptPoints = resetPoints ? 0 : toInteger(attempt.points);
+      const rawAttemptPoints = toInteger(attempt.points);
       const dailyRewardData = dailyRewardSnapshot.exists ? dailyRewardSnapshot.data() || {} : {};
       const previousDailyEarned = toNonNegativeNumber(dailyRewardData.earned);
       const dailyRewardRemaining = Math.max(0, DAILY_REWARD_CAP - previousDailyEarned);
       const cappedAttemptPoints = rawAttemptPoints > 0
         ? Math.min(rawAttemptPoints, dailyRewardRemaining)
         : rawAttemptPoints;
-      const nextTotalPoints = resetPoints
-        ? 0
-        : Math.max(0, previousTotalPoints + cappedAttemptPoints);
+      const nextTotalPoints = Math.max(0, previousTotalPoints + cappedAttemptPoints);
       const attemptToSave = {
         ...attempt,
-        points: resetPoints ? 0 : nextTotalPoints - previousTotalPoints,
+        points: nextTotalPoints - previousTotalPoints,
         originalPoints: rawAttemptPoints,
+        quizKey,
         rewardCapped: rawAttemptPoints > cappedAttemptPoints,
         rewardCap: DAILY_REWARD_CAP,
         dailyRewardBucket,
@@ -911,6 +1249,7 @@ app.post('/api/attempts', requireAuth, async (req, res, next) => {
 
       const nextTotals = {
         totalPoints: nextTotalPoints,
+        points: nextTotalPoints,
         testsCompleted: toInteger(latest.testsCompleted) + 1,
         totalTimeSpent: toNonNegativeNumber(latest.totalTimeSpent) + toNonNegativeNumber(attempt.timeSpent),
         totalCorrectAnswers: toInteger(latest.totalCorrectAnswers) + toInteger(attempt.score),
@@ -925,6 +1264,16 @@ app.post('/api/attempts', requireAuth, async (req, res, next) => {
       persistedAttempt = attemptToSave;
       persistedReview = review;
       transaction.set(attemptRef, attemptToSave);
+      transaction.set(completionRef, {
+        quizKey,
+        chapter: attemptToSave.chapter,
+        partNumber: attemptToSave.partNumber,
+        partLabel: attemptToSave.partLabel,
+        attemptId: backendAttemptId,
+        completedAtMs: nowMs,
+        completedAt: serverTimestamp(),
+        updatedAt: serverTimestamp()
+      }, { merge: true });
       transaction.set(issuedSession.ref, {
         status: 'completed',
         consumedAtMs: nowMs,
@@ -963,6 +1312,101 @@ app.post('/api/attempts', requireAuth, async (req, res, next) => {
   }
 });
 
+app.post('/api/recordings/chunks', requireAuth, async (req, res, next) => {
+  try {
+    const raw = req.body || {};
+    const index = toInteger(raw.index);
+    const attemptId = sanitizeStorageSegment(raw.attemptId, '', 160);
+    const quizId = sanitizeStorageSegment(raw.quizId, 'quiz', 120);
+    const studentId = sanitizeStorageSegment(req.auth.uid, '', 160);
+    const requestedContentType = String(raw.contentType || '').trim();
+    const contentType = /^video\/webm/i.test(requestedContentType) || /^video\/x-matroska/i.test(requestedContentType)
+      ? requestedContentType
+      : 'video/webm;codecs=vp8,opus';
+    const rawBase64 = String(raw.dataBase64 || raw.base64 || raw.data || '')
+      .replace(/^data:[^;]+;base64,/i, '')
+      .trim();
+
+    if (!studentId) {
+      throw createHttpError(400, 'Recording upload requires a signed-in user.');
+    }
+    if (!/^[A-Za-z0-9_-]{3,160}$/.test(attemptId)) {
+      throw createHttpError(400, 'A valid recording attempt ID is required.');
+    }
+    if (!quizId) {
+      throw createHttpError(400, 'A valid quiz ID is required.');
+    }
+    if (index < 1 || index > 9999) {
+      throw createHttpError(400, 'A valid recording chunk index is required.');
+    }
+    if (!rawBase64 || !/^[A-Za-z0-9+/=_-]+$/.test(rawBase64)) {
+      throw createHttpError(400, 'Recording chunk data is missing or invalid.');
+    }
+
+    const normalizedBase64 = rawBase64.replace(/-/g, '+').replace(/_/g, '/');
+    const buffer = Buffer.from(normalizedBase64, 'base64');
+    const maxChunkBytes = Number(process.env.MAX_RECORDING_CHUNK_BYTES || 20 * 1024 * 1024);
+    if (!buffer.length || buffer.length > maxChunkBytes) {
+      throw createHttpError(400, 'Recording chunk is empty or too large.');
+    }
+
+    const fileName = `chunk_${String(index).padStart(4, '0')}.webm`;
+    const recordingPath = `quiz-recordings/${studentId}/${quizId}/${attemptId}/chunks/${fileName}`;
+    await admin.storage().bucket().file(recordingPath).save(buffer, {
+      resumable: false,
+      metadata: {
+        contentType,
+        metadata: {
+          studentId,
+          quizId,
+          attemptId,
+          chunkIndex: String(index),
+          uploadedVia: 'backend'
+        }
+      }
+    });
+
+    const recordingRef = db.collection('recordings').doc(attemptId);
+    const nowMs = Date.now();
+    await Promise.all([
+      recordingRef.set({
+        studentId,
+        quizId,
+        attemptId,
+        status: 'recording',
+        chunkCount: index,
+        failedChunkCount: 0,
+        backendChunkUpload: true,
+        updatedAt: serverTimestamp(),
+        updatedAtMs: nowMs
+      }, { merge: true }),
+      recordingRef.collection('chunks').doc(`chunk_${String(index).padStart(4, '0')}`).set({
+        index,
+        path: recordingPath,
+        downloadURL: '',
+        size: buffer.length,
+        contentType,
+        status: 'uploaded',
+        uploadedVia: 'backend',
+        uploadedAt: serverTimestamp(),
+        uploadedAtMs: nowMs
+      }, { merge: true })
+    ]);
+
+    res.status(201).json({
+      chunk: {
+        index,
+        path: recordingPath,
+        size: buffer.length,
+        contentType,
+        status: 'uploaded'
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.get('/api/admin/dashboard', requireAuth, requireAdmin, async (req, res, next) => {
   try {
     res.json(await getAdminDashboardData());
@@ -993,21 +1437,219 @@ app.patch('/api/admin/withdrawals/:requestId/status', requireAuth, requireAdmin,
     }
 
     const requestRef = db.collection('withdrawalRequests').doc(requestId);
-    const snapshot = await requestRef.get();
-    if (!snapshot.exists) {
-      throw createHttpError(404, 'Withdrawal request not found.');
-    }
-
     const nowMs = Date.now();
-    await requestRef.set({
-      status,
-      updatedAtMs: nowMs,
-      updatedAt: serverTimestamp(),
-      updatedBy: req.auth.email || req.auth.uid
-    }, { merge: true });
+    let updatedUser = null;
+
+    await db.runTransaction(async (transaction) => {
+      const snapshot = await transaction.get(requestRef);
+      if (!snapshot.exists) {
+        throw createHttpError(404, 'Withdrawal request not found.');
+      }
+
+      const request = snapshot.data() || {};
+      const userId = clampText(request.userId, 120);
+      const requestedPoints = toInteger(request.requestedPoints);
+      if (!userId) {
+        throw createHttpError(400, 'Withdrawal request is missing a user id.');
+      }
+
+      if (requestedPoints <= 0) {
+        throw createHttpError(400, 'Withdrawal request has invalid requested points.');
+      }
+
+      const userRef = db.collection('users').doc(userId);
+      const userSnapshot = await transaction.get(userRef);
+      if (!userSnapshot.exists) {
+        throw createHttpError(404, 'Withdrawal user profile not found.');
+      }
+
+      const userData = userSnapshot.data() || {};
+      const currentBalance = toInteger(userData.totalPoints);
+      const wasDeducted = Boolean(request.walletDeducted);
+      const shouldDeduct = WITHDRAWAL_DEDUCTION_STATUSES.has(status);
+      const updatePayload = {
+        status,
+        updatedAtMs: nowMs,
+        updatedAt: serverTimestamp(),
+        updatedBy: req.auth.email || req.auth.uid
+      };
+
+      if (shouldDeduct && !wasDeducted) {
+        if (currentBalance < requestedPoints) {
+          throw createHttpError(409, 'User wallet balance is lower than the requested withdrawal points.');
+        }
+
+        const nextBalance = Math.max(0, currentBalance - requestedPoints);
+        transaction.set(userRef, {
+          totalPoints: nextBalance,
+          points: nextBalance,
+          updatedAt: serverTimestamp(),
+          lastWithdrawalAt: serverTimestamp()
+        }, { merge: true });
+
+        Object.assign(updatePayload, {
+          walletDeducted: true,
+          deductedPoints: requestedPoints,
+          deductedAtMs: nowMs,
+          deductedAt: serverTimestamp(),
+          walletBalanceBeforeDeduction: currentBalance,
+          walletBalanceAfterDeduction: nextBalance
+        });
+        updatedUser = {
+          id: userId,
+          totalPoints: nextBalance
+        };
+      } else if (!shouldDeduct && wasDeducted) {
+        const deductedPoints = toInteger(request.deductedPoints || requestedPoints);
+        const nextBalance = currentBalance + deductedPoints;
+        transaction.set(userRef, {
+          totalPoints: nextBalance,
+          points: nextBalance,
+          updatedAt: serverTimestamp()
+        }, { merge: true });
+
+        Object.assign(updatePayload, {
+          walletDeducted: false,
+          refundedPoints: deductedPoints,
+          refundedAtMs: nowMs,
+          refundedAt: serverTimestamp(),
+          walletBalanceAfterRefund: nextBalance
+        });
+        updatedUser = {
+          id: userId,
+          totalPoints: nextBalance
+        };
+      } else {
+        updatedUser = {
+          id: userId,
+          totalPoints: currentBalance
+        };
+      }
+
+      transaction.set(requestRef, updatePayload, { merge: true });
+    });
 
     const updatedSnapshot = await requestRef.get();
-    res.json({ withdrawalRequest: normalizeWithdrawalRequestDoc(updatedSnapshot) });
+    res.json({
+      withdrawalRequest: normalizeWithdrawalRequestDoc(updatedSnapshot),
+      user: updatedUser
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.patch('/api/admin/referrals/:referralId/status', requireAuth, requireAdmin, async (req, res, next) => {
+  try {
+    const referralId = clampText(req.params.referralId, 220);
+    const status = clampText(req.body && req.body.status, 40);
+    const suspiciousReason = clampText(req.body && req.body.suspiciousReason, 240);
+
+    if (!referralId) {
+      throw createHttpError(400, 'Referral id is required.');
+    }
+
+    if (!['completed', 'cancelled'].includes(status)) {
+      throw createHttpError(400, 'Invalid referral status.');
+    }
+
+    const referralRef = db.collection('referrals').doc(referralId);
+    const nowMs = Date.now();
+    let updatedReferral = null;
+    let updatedUser = null;
+
+    await db.runTransaction(async (transaction) => {
+      const referralSnapshot = await transaction.get(referralRef);
+      if (!referralSnapshot.exists) {
+        throw createHttpError(404, 'Referral record not found.');
+      }
+
+      const referral = referralSnapshot.data() || {};
+      const currentStatus = clampText(referral.status, 40, 'completed');
+      const rewardPoints = toInteger(referral.rewardPoints, REFERRAL_REWARD_POINTS);
+      const referrerUserId = clampText(referral.referrerUserId, 160);
+      if (!referrerUserId) {
+        throw createHttpError(400, 'Referral record is missing a referrer.');
+      }
+
+      const referrerRef = db.collection('users').doc(referrerUserId);
+      const referrerSnapshot = await transaction.get(referrerRef);
+      if (!referrerSnapshot.exists) {
+        throw createHttpError(404, 'Referrer profile not found.');
+      }
+
+      const referrer = referrerSnapshot.data() || {};
+      const currentPoints = toInteger(referrer.totalPoints ?? referrer.points);
+      const currentReferralPoints = toInteger(referrer.referralPoints);
+      const currentTotalReferrals = toInteger(referrer.totalReferrals ?? referrer.numberOfReferrals ?? referrer.noOfReferrals);
+
+      if (status === 'cancelled' && currentStatus !== 'cancelled') {
+        const nextPoints = Math.max(0, currentPoints - rewardPoints);
+        const nextReferralPoints = Math.max(0, currentReferralPoints - rewardPoints);
+        const nextTotalReferrals = Math.max(0, currentTotalReferrals - 1);
+
+        transaction.set(referrerRef, {
+          totalPoints: nextPoints,
+          points: nextPoints,
+          referralPoints: nextReferralPoints,
+          totalReferrals: nextTotalReferrals,
+          numberOfReferrals: nextTotalReferrals,
+          noOfReferrals: nextTotalReferrals,
+          updatedAt: serverTimestamp()
+        }, { merge: true });
+        transaction.set(referrerRef.collection('pointsHistory').doc(), {
+          type: 'referral_bonus_cancelled',
+          points: -rewardPoints,
+          message: 'Referral bonus cancelled by admin review',
+          referredUserId: clampText(referral.referredUserId, 160),
+          referralId,
+          createdAt: serverTimestamp(),
+          createdAtMs: nowMs
+        });
+        updatedUser = {
+          id: referrerUserId,
+          totalPoints: nextPoints,
+          points: nextPoints,
+          referralPoints: nextReferralPoints,
+          totalReferrals: nextTotalReferrals,
+          numberOfReferrals: nextTotalReferrals,
+          noOfReferrals: nextTotalReferrals
+        };
+      } else {
+        updatedUser = {
+          id: referrerUserId,
+          totalPoints: currentPoints,
+          points: currentPoints,
+          referralPoints: currentReferralPoints,
+          totalReferrals: currentTotalReferrals,
+          numberOfReferrals: currentTotalReferrals,
+          noOfReferrals: currentTotalReferrals
+        };
+      }
+
+      const updatePayload = {
+        status,
+        suspicious: status === 'cancelled' ? true : Boolean(referral.suspicious),
+        suspiciousReason: status === 'cancelled'
+          ? (suspiciousReason || 'Cancelled by admin review')
+          : clampText(referral.suspiciousReason, 240),
+        updatedAt: serverTimestamp(),
+        updatedAtMs: nowMs,
+        updatedBy: req.auth.email || req.auth.uid
+      };
+
+      if (status === 'cancelled') {
+        updatePayload.cancelledAt = serverTimestamp();
+        updatePayload.cancelledAtMs = nowMs;
+        updatePayload.cancelledBy = req.auth.email || req.auth.uid;
+      }
+
+      transaction.set(referralRef, updatePayload, { merge: true });
+    });
+
+    const updatedSnapshot = await referralRef.get();
+    updatedReferral = normalizeReferralRecordDoc(updatedSnapshot);
+    res.json({ referral: updatedReferral, user: updatedUser });
   } catch (error) {
     next(error);
   }

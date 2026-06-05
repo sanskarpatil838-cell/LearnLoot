@@ -1,23 +1,13 @@
 {
   "hosting": {
-    "public": ".",
+    "public": "netlify-public",
+    "predeploy": [
+      "npm run build"
+    ],
     "ignore": [
       "firebase.json",
       "**/.*",
-      "**/node_modules/**",
-      "backend/**",
-      ".vscode/**",
-      "dev-server.js",
-      "question-bank.js",
-      "README.md",
-      "FIREBASE_SETUP.md",
-      "firestore.rules",
-      "firestore.backend.rules",
-      "firestore.indexes.json",
-      "storage.rules",
-      "*.log",
-      "service-account*.json",
-      "firebase-service-account*.json"
+      "**/node_modules/**"
     ],
     "headers": [
       {

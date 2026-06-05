@@ -44,16 +44,16 @@ Open [firebase-config.js](./firebase-config.js) and replace:
 4. Replace the rules with the contents of [storage.rules](./storage.rules).
 5. Publish the rules.
 
-If you use Firebase CLI, run:
+Deploy Firestore, Storage, and Functions together for production:
 
 ```bash
-firebase deploy --only firestore,storage
+firebase deploy --only functions,firestore,storage
 ```
 
 Quiz recordings upload to:
 
 ```text
-quiz-recordings/{studentId}/{quizId}/{attemptId}.webm
+quiz-recordings/{studentId}/{quizId}/{attemptId}/chunks/chunk_0001.webm
 ```
 
 ## 7. What the app now stores in Firestore
@@ -66,6 +66,13 @@ quiz-recordings/{studentId}/{quizId}/{attemptId}.webm
   - includes `recordingUrl` and `recordingPath` after recording upload succeeds
   - used for history and charts
   - queried with a collection group by the admin dashboard, so recent attempts can load without scanning every user one by one
+- `users/{uid}/quizSessions/{attemptId}`
+  - backend-issued single-use quiz attempts
+  - stores the exact question ids used for trusted grading
+  - direct browser reads/writes are blocked by the current rules
+- `users/{uid}/rewardLimits/{date}`
+  - backend-maintained daily positive reward cap
+  - used to prevent unlimited cash accrual from repeated tests
 
 ## 8. Important test before launch
 
@@ -79,13 +86,13 @@ quiz-recordings/{studentId}/{quizId}/{attemptId}.webm
    - the same account works on another device
    - leaderboard updates for all users
 
-## 9. Optional backend mode
+## 9. Firebase Functions backend
 
-The project includes a Node/Firebase Admin backend in `backend/`.
+The trusted backend is in `functions/`. The old standalone `backend/` copy has been removed.
 
-Use it when you want profile updates, test attempts, leaderboard reads, and admin dashboard reads to go through a trusted server instead of direct browser writes.
+Use Functions for profile updates, issued quiz attempts, grading, leaderboard reads, admin dashboard reads, and recording merge tasks.
 
-1. Follow `backend/README.md`.
-2. Set `window.backendConfig.apiBaseUrl` in `firebase-config.js`.
-3. Test login, test submit, leaderboard, and admin dashboard.
-4. Keep `requireBackend: true` and `allowClientFirestoreFallback: false` for production.
+1. Set `window.backendConfig.apiBaseUrl` in `firebase-config.js`.
+2. Keep `requireBackend: true` and `allowClientFirestoreFallback: false` for production.
+3. Configure production environment variables such as `ADMIN_EMAILS`, `CORS_ORIGINS`, `DAILY_REWARD_CAP`, `MAX_QUIZ_STARTS_PER_HOUR`, and optionally `REQUIRE_APP_CHECK=true`.
+4. Test login, quiz start, quiz submit, leaderboard, admin dashboard, recording upload, and recording merge.

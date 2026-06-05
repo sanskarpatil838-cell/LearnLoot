@@ -5,6 +5,8 @@ node_modules/
 .firebase/
 netlify-public/
 netlify-drop/
+.local-dev-data/
+.local-recordings/
 learnloot-netlify-drop.zip
 github-upload/
 learnloot-github-upload.zip
