@@ -814,6 +814,11 @@ function initApp() {
             return;
         }
 
+        if (e.key === 'Escape' && document.getElementById('pending-payment-modal')?.classList.contains('active')) {
+            closePendingPaymentModal();
+            return;
+        }
+
         if (e.key === 'Escape' && document.getElementById('withdraw-modal')?.style.display !== 'none') {
             closeWithdrawModal();
             return;
@@ -4370,6 +4375,7 @@ async function showHomeScreen() {
     selectedCourseId = '';
     const requestedPaymentCourseId = selectRequestedPaymentCourse();
     generateChapterList();
+    restorePendingPaymentPrompt();
     if (requestedPaymentCourseId) {
         window.setTimeout(() => {
             document.getElementById('chapter-section-title')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -5062,6 +5068,65 @@ function buyLockedQuizCourse() {
     const courseId = lockedQuizCourseId;
     closeLockedQuizModal();
     buyCourse(courseId);
+}
+
+function showPendingPaymentModal(courseId = getPendingCourseId()) {
+    const normalizedCourseId = String(courseId || '').trim();
+    if (!isKnownPaymentCourse(normalizedCourseId) || isCoursePurchased(normalizedCourseId)) return;
+
+    localStorage.setItem(LEARNLOOT_PENDING_COURSE_KEY, normalizedCourseId);
+    const courseName = document.getElementById('pending-payment-course-name');
+    if (courseName) {
+        courseName.textContent = paymentCourseNames[normalizedCourseId] || normalizedCourseId;
+    }
+    document.getElementById('pending-payment-modal')?.classList.add('active');
+}
+
+function closePendingPaymentModal() {
+    document.getElementById('pending-payment-modal')?.classList.remove('active');
+}
+
+function reopenPendingPaymentLink() {
+    const courseId = getPendingCourseId();
+    if (!courseId) {
+        closePendingPaymentModal();
+        showPointsNotification('No pending course purchase was found.', 'points-lost');
+        return;
+    }
+    openCoursePaymentLink(courseId);
+}
+
+function confirmPendingCoursePurchase() {
+    const courseId = getPendingCourseId();
+    if (!courseId || !markCoursePurchased(courseId)) {
+        closePendingPaymentModal();
+        showPointsNotification('Could not find the pending course. Please contact support.', 'points-lost');
+        return;
+    }
+
+    const chapterContext = activeChapterPurchaseContext
+        ? { ...activeChapterPurchaseContext }
+        : null;
+    localStorage.removeItem(LEARNLOOT_PENDING_COURSE_KEY);
+    closePendingPaymentModal();
+    closeLockedQuizModal();
+    closeChapterPartsModal();
+    refreshCoursePurchaseUI();
+    generateChapterList();
+    if (chapterContext?.courseId === courseId && chapterContext.chapter) {
+        openChapterParts(chapterContext.chapter, chapterContext.chapterIndex);
+    }
+    showPointsNotification(`${paymentCourseNames[courseId] || 'Course'} unlocked successfully.`, 'points-added');
+}
+
+function restorePendingPaymentPrompt() {
+    const courseId = getPendingCourseId();
+    if (!courseId) return;
+    if (isCoursePurchased(courseId)) {
+        localStorage.removeItem(LEARNLOOT_PENDING_COURSE_KEY);
+        return;
+    }
+    window.setTimeout(() => showPendingPaymentModal(courseId), 250);
 }
 
 function openChapterParts(ch, chapterIndex = null) {
@@ -5923,19 +5988,34 @@ function selectRequestedPaymentCourse() {
 }
 
 function refreshCoursePurchaseUI() {
+    const pendingCourseId = getPendingCourseId();
     document.querySelectorAll('[data-course-purchase-id]').forEach((card) => {
         const courseId = card.dataset.coursePurchaseId || '';
         const purchased = isCoursePurchased(courseId);
+        const paymentPending = !purchased && courseId === pendingCourseId;
         const buyButton = card.querySelector('[data-buy-course]');
         const statusBadge = card.querySelector('[data-purchase-status]');
 
         card.classList.toggle('purchased-course', purchased);
-        if (buyButton) buyButton.hidden = purchased;
+        if (buyButton) {
+            buyButton.hidden = purchased;
+            buyButton.innerHTML = paymentPending
+                ? '<i class="fas fa-circle-check"></i> Complete Purchase'
+                : '<i class="fas fa-bag-shopping"></i> Buy Now';
+            buyButton.setAttribute(
+                'onclick',
+                paymentPending
+                    ? `event.stopPropagation(); showPendingPaymentModal('${courseId}')`
+                    : `event.stopPropagation(); buyCourse('${courseId}')`
+            );
+        }
         if (statusBadge) {
             statusBadge.className = purchased ? 'purchased-badge' : 'demo-available-badge';
             statusBadge.innerHTML = purchased
                 ? '<i class="fas fa-circle-check"></i> Purchased'
-                : '<i class="fas fa-gift"></i> Demo Available';
+                : (paymentPending
+                    ? '<i class="fas fa-clock"></i> Payment Pending'
+                    : '<i class="fas fa-gift"></i> Demo Available');
         }
     });
 }
@@ -7560,8 +7640,13 @@ function id(s) { return document.getElementById(s); }
 // ===== INIT =====
 // ============================================================
 document.addEventListener('DOMContentLoaded', refreshCoursePurchaseUI);
+window.addEventListener('focus', () => {
+    if (currentUser && getPendingCourseId() && !document.getElementById('pending-payment-modal')?.classList.contains('active')) {
+        showPendingPaymentModal();
+    }
+});
 window.addEventListener('storage', (event) => {
-    if (event.key === LEARNLOOT_PURCHASED_COURSES_KEY) {
+    if (event.key === LEARNLOOT_PURCHASED_COURSES_KEY || event.key === LEARNLOOT_PENDING_COURSE_KEY) {
         refreshCoursePurchaseUI();
     }
 });

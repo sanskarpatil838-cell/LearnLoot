@@ -75,17 +75,42 @@ function canAccessQuiz(courseId, chapterIndex, quizIndex) {
   return isCoursePurchased(courseId) || isFreeDemoQuiz(chapterIndex, quizIndex);
 }
 
-function buyCourse(courseId) {
+function getPendingCourseId() {
+  const courseId = String(localStorage.getItem(LEARNLOOT_PENDING_COURSE_KEY) || "").trim();
+  return isKnownPaymentCourse(courseId) ? courseId : "";
+}
+
+function openCoursePaymentLink(courseId) {
   const normalizedCourseId = String(courseId || "").trim();
   const link = paymentLinks[normalizedCourseId];
 
   if (!link) {
     alert("Payment link is not added for this course yet.");
+    return false;
+  }
+
+  const paymentWindow = window.open(link, "_blank");
+  if (paymentWindow) {
+    paymentWindow.opener = null;
+    return true;
+  }
+
+  window.location.href = link;
+  return false;
+}
+
+function buyCourse(courseId) {
+  const normalizedCourseId = String(courseId || "").trim();
+  if (!isKnownPaymentCourse(normalizedCourseId)) {
+    alert("Payment link is not added for this course yet.");
     return;
   }
 
   localStorage.setItem(LEARNLOOT_PENDING_COURSE_KEY, normalizedCourseId);
-  window.location.href = link;
+  const openedInNewTab = openCoursePaymentLink(normalizedCourseId);
+  if (openedInNewTab && typeof window.showPendingPaymentModal === "function") {
+    window.showPendingPaymentModal(normalizedCourseId);
+  }
 }
 
 window.LearnLootPayments = Object.freeze({

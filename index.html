@@ -510,6 +510,32 @@
   </div>
 </div>
 
+<div class="learnloot-modal-overlay" id="pending-payment-modal" role="dialog" aria-modal="true" aria-labelledby="pending-payment-title" onclick="if(event.target===this) closePendingPaymentModal()">
+  <div class="learnloot-modal payment-pending-modal">
+    <div class="locked-modal-icon payment-pending-icon" aria-hidden="true">
+      <i class="fas fa-credit-card"></i>
+    </div>
+    <h2 id="pending-payment-title">Complete Your Purchase</h2>
+    <p>
+      Finish the payment in the Razorpay tab. After Razorpay shows
+      <strong>Payment Completed</strong>, return here and unlock your course.
+    </p>
+    <div class="pending-course-summary">
+      <span>Selected course</span>
+      <strong id="pending-payment-course-name">LearnLoot course</strong>
+    </div>
+    <div class="learnloot-modal-actions pending-payment-actions">
+      <button class="modal-cancel-btn" type="button" onclick="closePendingPaymentModal()">Not Yet</button>
+      <button class="modal-cancel-btn reopen-payment-btn" type="button" onclick="reopenPendingPaymentLink()">
+        <i class="fas fa-arrow-up-right-from-square"></i> Open Razorpay
+      </button>
+      <button class="buy-now-btn confirm-payment-btn" type="button" onclick="confirmPendingCoursePurchase()">
+        <i class="fas fa-circle-check"></i> Payment Completed
+      </button>
+    </div>
+  </div>
+</div>
+
 <!-- ===== RESULT ===== -->
 <div class="container" id="result" style="display:none">
   <div class="result-container">
@@ -547,8 +573,8 @@
 <script defer src="https://www.gstatic.com/firebasejs/12.12.1/firebase-functions-compat.js"></script>
 <script defer src="https://www.gstatic.com/firebasejs/12.12.1/firebase-app-check-compat.js"></script>
 <script defer src="firebase-config.js?v=20260605-local-backend-default-v1"></script>
-<script src="payment-config.js?v=20260606-payment-links-v1" defer></script>
-<script src="script.js?v=20260606-payment-links-v1" defer></script>
+<script src="payment-config.js?v=20260606-payment-return-v2" defer></script>
+<script src="script.js?v=20260606-payment-return-v2" defer></script>
 <script defer>
   (function hardenBackendCalls() {
     function getAppCheckConfig() {
