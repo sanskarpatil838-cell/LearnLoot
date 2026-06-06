@@ -4025,11 +4025,10 @@ function renderAdminDashboard() {
                     <div class="lb-avatar">${escapeHtml(getDisplayAvatar(user.avatar))}</div>
                     <div class="lb-info">
                         <strong>${escapeHtml(user.name || 'Student')}</strong>
-                        <span>${Number(user.testsCompleted || 0)} tests | ${formatTimeSpent(Number(user.totalTimeSpent || 0))}</span>
+                        <span>${Number(user.testsCompleted || 0)} tests completed</span>
                     </div>
                     <div class="lb-score">
                         <strong>Cash ${Number(user.totalPoints || 0)}</strong>
-                        <span>${getAccuracyText(user.totalCorrectAnswers, user.totalQuestionsAttempted)}</span>
                     </div>
                 </div>
             `).join('');
@@ -4259,7 +4258,8 @@ function createGoogleAuthProvider() {
 function shouldFallbackToGoogleRedirect(error) {
     return [
         'auth/popup-blocked',
-        'auth/operation-not-supported-in-this-environment'
+        'auth/operation-not-supported-in-this-environment',
+        'auth/web-storage-unsupported'
     ].includes(error?.code);
 }
 
@@ -5245,11 +5245,10 @@ function renderLeaderboard() {
             <div class="lb-avatar">${escapeHtml(getDisplayAvatar(e.avatar))}</div>
             <div class="lb-info">
                 <strong>${escapeHtml(e.name || 'Student')}</strong>
-                <span>${Number(e.testsCompleted || 0)} tests | ${getAccuracyText(e.totalCorrectAnswers, e.totalQuestionsAttempted)}</span>
+                <span>${Number(e.testsCompleted || 0)} tests completed</span>
             </div>
             <div class="lb-score">
                 <strong style="color:var(--warning)">Cash ${Number(e.totalPoints || 0)}</strong>
-                <span>${formatTimeSpent(Number(e.totalTimeSpent || 0))}</span>
             </div>
         </div>
     `).join('');
@@ -5711,6 +5710,8 @@ const MEGA_COURSE_CATALOG = [
         icon: 'fa-graduation-cap',
         description: 'Class 11th & 12th Maths, Physics, Chemistry',
         status: 'Open subjects',
+        originalPrice: 1399,
+        discountedPrice: 999,
         courseIds: COURSE_CATALOG.map((course) => course.id)
     },
     {
@@ -5719,6 +5720,8 @@ const MEGA_COURSE_CATALOG = [
         icon: 'fa-book-open-reader',
         description: 'Class 11th & 12th Maths, Physics, Chemistry',
         status: 'Open subjects',
+        originalPrice: 1799,
+        discountedPrice: 1499,
         courseIds: COURSE_CATALOG.map((course) => course.id)
     }
 ];
@@ -5818,6 +5821,24 @@ function getMegaCourseToolbarHtml(megaCourse) {
         </div>`;
 }
 
+function formatCoursePrice(price) {
+    return `₹${Number(price || 0).toLocaleString('en-IN')}`;
+}
+
+function getCoursePriceHtml(megaCourse) {
+    const originalPrice = Number(megaCourse?.originalPrice || 0);
+    const discountedPrice = Number(megaCourse?.discountedPrice || 0);
+    if (!originalPrice || !discountedPrice) return '';
+
+    const discountPercent = Math.round(((originalPrice - discountedPrice) / originalPrice) * 100);
+    return `
+        <div class="course-card-price" aria-label="Discounted price ${formatCoursePrice(discountedPrice)}, original price ${formatCoursePrice(originalPrice)}">
+            <strong>${formatCoursePrice(discountedPrice)}</strong>
+            <del>${formatCoursePrice(originalPrice)}</del>
+            <span>${discountPercent}% off</span>
+        </div>`;
+}
+
 function renderMegaCourseCards() {
     setChapterSectionTitle('Choose Your Course');
     chapterList.innerHTML = MEGA_COURSE_CATALOG.map((course, index) => `
@@ -5848,6 +5869,7 @@ function renderCourseCards() {
             <div class="course-card-icon"><i class="fas ${course.icon}"></i></div>
             <div class="chapter-number">${index + 1}</div>
             <h3>${escapeHtml(course.title)}</h3>
+            ${getCoursePriceHtml(selectedMegaCourse)}
             ${course.status ? `<span class="course-card-status">${escapeHtml(course.status)}</span>` : '<span class="course-card-status empty-status">&nbsp;</span>'}
         </button>`).join('');
 }

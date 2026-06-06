@@ -25,7 +25,7 @@
   };
 </script>
 <script defer src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js"></script>
-<link rel="stylesheet" href="styles.css?v=20260604-once-only-v1"/>
+<link rel="stylesheet" href="styles.css?v=20260606-auth-pricing-v1"/>
 </head>
 <body class="dark">
 
@@ -67,9 +67,6 @@
       <button class="auth-link-button" onclick="sendPasswordReset()" type="button">
         Forgot password?
       </button>
-      
-      <p class="auth-note">Your account, scores, history, and leaderboard will sync across devices.</p>
-      <p class="auth-note">Allowlisted admin accounts will unlock the admin dashboard automatically after sign-in.</p>
       <p class="auth-status" id="auth-status"></p>
     </div>
   </div>
@@ -534,7 +531,7 @@
 <script defer src="https://www.gstatic.com/firebasejs/12.12.1/firebase-functions-compat.js"></script>
 <script defer src="https://www.gstatic.com/firebasejs/12.12.1/firebase-app-check-compat.js"></script>
 <script defer src="firebase-config.js?v=20260605-local-backend-default-v1"></script>
-<script src="script.js?v=20260605-firebase-users-referrals-v11" defer></script>
+<script src="script.js?v=20260606-auth-pricing-v1" defer></script>
 <script defer>
   (function hardenBackendCalls() {
     function getAppCheckConfig() {
