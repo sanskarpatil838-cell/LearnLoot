@@ -38,6 +38,16 @@ service cloud.firestore {
         allow read: if isOwner(userId) || isAdmin();
         allow create, update, delete: if false;
       }
+
+      match /purchases/{courseId} {
+        allow read: if isOwner(userId) || isAdmin();
+        allow create, update, delete: if false;
+      }
+
+      match /paymentIntents/{paymentLinkId} {
+        allow read: if isOwner(userId) || isAdmin();
+        allow create, update, delete: if false;
+      }
     }
 
     match /{path=**}/attempts/{attemptId} {
@@ -58,6 +68,16 @@ service cloud.firestore {
             || resource.data.referredUserId == request.auth.uid
           )
         );
+      allow create, update, delete: if false;
+    }
+
+    match /payments/{paymentId} {
+      allow read: if isAdmin();
+      allow create, update, delete: if false;
+    }
+
+    match /paymentIntents/{paymentLinkId} {
+      allow read: if isAdmin();
       allow create, update, delete: if false;
     }
 

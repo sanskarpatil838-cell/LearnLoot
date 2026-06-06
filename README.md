@@ -66,3 +66,37 @@ If `REQUIRE_APP_CHECK=true`, also set `window.appCheckConfig.enabled = true` and
 - `firestore.rules`, `storage.rules`, and `firestore.indexes.json` must be deployed with the app.
 - `netlify-public/` is generated build output and can be recreated with `npm.cmd run build`.
 - Do not change Firebase Hosting back to `"public": "."`; that can expose backend source and answer banks.
+# Secure Razorpay course payments
+
+LearnLoot creates a new Razorpay Payment Link for each signed-in user. Course
+access is granted only after the Firebase backend verifies a signed Razorpay
+webhook and stores an active purchase in Firestore.
+
+Configure the required Firebase Function secrets:
+
+```powershell
+firebase functions:secrets:set RAZORPAY_KEY_ID
+firebase functions:secrets:set RAZORPAY_KEY_SECRET
+firebase functions:secrets:set RAZORPAY_WEBHOOK_SECRET
+```
+
+Then deploy the API and Firestore rules:
+
+```powershell
+firebase deploy --only functions:api,firestore:rules
+```
+
+Configure this webhook in the Razorpay Dashboard:
+
+```text
+https://us-central1-earnlearn-68952.cloudfunctions.net/api/api/payments/razorpay-webhook
+```
+
+Use the same value entered for `RAZORPAY_WEBHOOK_SECRET` and enable these
+events:
+
+- `payment_link.paid`
+- `payment.captured`
+
+Razorpay credentials and webhook secrets must never be added to frontend files
+or committed to Git.

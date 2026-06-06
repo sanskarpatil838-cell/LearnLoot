@@ -422,4 +422,10 @@ exports.cleanupDeletedQuizRecording = onObjectDeleted({ region: "us-east1" }, as
   return null;
 });
 
-exports.api = onRequest(apiApp);
+exports.api = onRequest({
+  secrets: [
+    "RAZORPAY_KEY_ID",
+    "RAZORPAY_KEY_SECRET",
+    "RAZORPAY_WEBHOOK_SECRET"
+  ]
+}, apiApp);

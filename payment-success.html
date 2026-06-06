@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="theme-color" content="#0b1120">
-  <title>Payment Successful | LearnLoot</title>
+  <title>Payment Verification | LearnLoot</title>
   <style>
     :root {
       color-scheme: dark;
@@ -12,43 +12,19 @@
       background: #07101f;
       color: #f8fafc;
     }
-
     * { box-sizing: border-box; }
-
     body {
       min-height: 100vh;
       margin: 0;
       display: grid;
       place-items: center;
-      overflow-x: hidden;
       padding: 24px;
       background:
         radial-gradient(circle at 20% 10%, rgba(79,124,255,0.22), transparent 34%),
         radial-gradient(circle at 88% 85%, rgba(139,92,246,0.2), transparent 34%),
         linear-gradient(145deg, #050b16, #0d1b31 58%, #071827);
     }
-
-    body::before,
-    body::after {
-      content: "";
-      position: fixed;
-      width: 280px;
-      height: 280px;
-      border-radius: 50%;
-      filter: blur(90px);
-      opacity: 0.32;
-      pointer-events: none;
-    }
-
-    body::before { top: -100px; left: -80px; background: #4f7cff; }
-    body::after { right: -90px; bottom: -110px; background: #8b5cf6; }
-
-    .success-shell {
-      position: relative;
-      z-index: 1;
-      width: min(620px, 100%);
-    }
-
+    .shell { width: min(620px, 100%); }
     .brand {
       display: flex;
       align-items: center;
@@ -57,9 +33,7 @@
       margin-bottom: 20px;
       font-size: 1.35rem;
       font-weight: 900;
-      letter-spacing: -0.02em;
     }
-
     .brand-mark {
       width: 46px;
       height: 46px;
@@ -69,8 +43,7 @@
       background: linear-gradient(135deg, #4f7cff, #8b5cf6);
       box-shadow: 0 16px 40px rgba(79,124,255,0.35);
     }
-
-    .success-card {
+    .card {
       padding: clamp(28px, 6vw, 48px);
       text-align: center;
       border: 1px solid rgba(255,255,255,0.14);
@@ -79,40 +52,35 @@
       box-shadow: 0 32px 100px rgba(0,0,0,0.52);
       backdrop-filter: blur(18px);
     }
-
-    .success-icon {
+    .status-icon {
       width: 88px;
       height: 88px;
       margin: 0 auto 22px;
       display: grid;
       place-items: center;
       border-radius: 50%;
-      color: #ffffff;
-      font-size: 2.8rem;
+      color: #fff;
+      font-size: 2rem;
       font-weight: 900;
+      background: linear-gradient(135deg, #f59e0b, #f97316);
+      box-shadow: 0 18px 50px rgba(249,115,22,0.3);
+    }
+    .status-icon.success {
       background: linear-gradient(135deg, #22c55e, #16a34a);
       box-shadow: 0 18px 50px rgba(34,197,94,0.35);
     }
-
-    .success-icon.error {
-      background: linear-gradient(135deg, #f97316, #ef4444);
-      box-shadow: 0 18px 50px rgba(239,68,68,0.3);
-    }
-
     h1 {
       margin: 0 0 12px;
       font-size: clamp(2rem, 6vw, 3rem);
       letter-spacing: -0.04em;
     }
-
     .message {
       margin: 0 auto 22px;
-      max-width: 500px;
+      max-width: 510px;
       color: #cbd5e1;
       font-size: 1.05rem;
       line-height: 1.7;
     }
-
     .course-panel {
       margin: 24px 0;
       padding: 18px;
@@ -120,7 +88,6 @@
       background: rgba(79,124,255,0.1);
       border: 1px solid rgba(129,140,248,0.24);
     }
-
     .course-panel span {
       display: block;
       color: #94a3b8;
@@ -129,117 +96,173 @@
       letter-spacing: 0.1em;
       text-transform: uppercase;
     }
-
     .course-panel strong {
       display: block;
       margin-top: 7px;
       color: #c7d2fe;
-      font-size: 1.05rem;
       word-break: break-word;
     }
-
-    .success-actions {
+    .actions {
       display: flex;
       flex-wrap: wrap;
       justify-content: center;
       gap: 12px;
       margin-top: 26px;
     }
-
-    .success-actions a {
-      min-width: 170px;
+    .actions a,
+    .actions button {
+      min-width: 180px;
       padding: 13px 20px;
+      border: 0;
       border-radius: 999px;
-      color: #ffffff;
+      color: #fff;
+      font: inherit;
       font-weight: 850;
       text-decoration: none;
+      cursor: pointer;
       transition: 0.25s ease;
     }
-
-    .success-actions a:hover { transform: translateY(-2px); }
-
-    .primary-action {
+    .actions a:hover,
+    .actions button:hover { transform: translateY(-2px); }
+    .actions button:disabled { cursor: wait; opacity: 0.7; transform: none; }
+    .primary {
       background: linear-gradient(135deg, #4f7cff, #8b5cf6);
       box-shadow: 0 14px 34px rgba(79,124,255,0.35);
     }
-
-    .secondary-action {
+    .secondary {
       background: rgba(255,255,255,0.1);
-      border: 1px solid rgba(255,255,255,0.14);
+      border: 1px solid rgba(255,255,255,0.14) !important;
     }
-
-    .support {
-      margin-top: 22px;
-      color: #94a3b8;
-      font-size: 0.9rem;
-    }
-
+    .support { margin-top: 22px; color: #94a3b8; font-size: 0.9rem; }
     .support a { color: #a5b4fc; }
-
     @media (max-width: 520px) {
       body { padding: 16px; }
-      .success-card { border-radius: 24px; }
-      .success-actions { flex-direction: column; }
-      .success-actions a { width: 100%; }
+      .card { border-radius: 24px; }
+      .actions { flex-direction: column; }
+      .actions a,
+      .actions button { width: 100%; }
     }
   </style>
 </head>
 <body>
-  <main class="success-shell">
-    <div class="brand">
-      <span class="brand-mark">L</span>
-      <span>LearnLoot</span>
-    </div>
-
-    <section class="success-card" aria-live="polite">
-      <div class="success-icon" id="success-icon">✓</div>
-      <h1 id="success-title">Payment Successful</h1>
-      <p class="message" id="success-message">Your course has been unlocked. You can now access every chapter and quiz in this course.</p>
-
+  <main class="shell">
+    <div class="brand"><span class="brand-mark">L</span><span>LearnLoot</span></div>
+    <section class="card" aria-live="polite">
+      <div class="status-icon" id="status-icon">...</div>
+      <h1 id="status-title">Verifying Payment</h1>
+      <p class="message" id="status-message">
+        We are checking Razorpay's signed payment confirmation. Your course will unlock automatically after verification.
+      </p>
       <div class="course-panel" id="course-panel">
-        <span>Unlocked course</span>
+        <span>Course being verified</span>
         <strong id="course-name"></strong>
         <strong id="course-id"></strong>
       </div>
-
-      <div class="success-actions" id="success-actions">
-        <a class="secondary-action" href="/">Go to Courses</a>
-        <a class="primary-action" id="start-learning-link" href="/">Start Learning</a>
+      <div class="actions" id="actions">
+        <a class="secondary" href="/">Go to Courses</a>
+        <button class="primary" id="refresh-status-btn" type="button">Refresh Unlock Status</button>
       </div>
-
-      <p class="support" id="support-message">
-        Need help? <a href="mailto:learnloot777@gmail.com">learnloot777@gmail.com</a>
-      </p>
+      <p class="support">Need help? <a href="mailto:learnloot777@gmail.com">learnloot777@gmail.com</a></p>
     </section>
   </main>
 
-  <script src="payment-config.js?v=20260606-payment-return-v2"></script>
+  <script src="https://www.gstatic.com/firebasejs/12.12.1/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/12.12.1/firebase-auth-compat.js"></script>
+  <script src="firebase-config.js?v=20260605-local-backend-default-v1"></script>
+  <script src="payment-config.js?v=20260606-secure-payments-v3"></script>
   <script>
-    (function handlePaymentSuccess() {
+    (function verifyPaymentStatus() {
       const params = new URLSearchParams(window.location.search);
       let courseId = String(params.get("courseId") || "").trim();
-
       if (!courseId) {
         courseId = String(localStorage.getItem(LEARNLOOT_PENDING_COURSE_KEY) || "").trim();
       }
 
-      const isValidCourse = isKnownPaymentCourse(courseId);
-      if (isValidCourse) {
-        markCoursePurchased(courseId);
-        localStorage.removeItem(LEARNLOOT_PENDING_COURSE_KEY);
+      const icon = document.getElementById("status-icon");
+      const title = document.getElementById("status-title");
+      const message = document.getElementById("status-message");
+      const coursePanel = document.getElementById("course-panel");
+      const refreshButton = document.getElementById("refresh-status-btn");
+      const backendBaseUrl = String(window.backendConfig?.apiBaseUrl || "").replace(/\/+$/, "");
+      let refreshAttempts = 0;
 
-        document.getElementById("course-name").textContent = paymentCourseNames[courseId] || "LearnLoot course";
-        document.getElementById("course-id").textContent = courseId;
-        document.getElementById("start-learning-link").href = `/?courseId=${encodeURIComponent(courseId)}#courses`;
-        return;
+      function setPendingState(text) {
+        icon.classList.remove("success");
+        icon.textContent = "...";
+        title.textContent = "Payment Verification Pending";
+        message.textContent = text;
       }
 
-      document.getElementById("success-icon").classList.add("error");
-      document.getElementById("success-icon").textContent = "!";
-      document.getElementById("success-title").textContent = "Course Unlock Pending";
-      document.getElementById("success-message").textContent = "Payment completed, but course ID was not found. Please contact support.";
-      document.getElementById("course-panel").style.display = "none";
-      document.getElementById("success-actions").innerHTML = '<a class="primary-action" href="/">Go to Courses</a>';
+      function setUnlockedState() {
+        icon.classList.add("success");
+        icon.textContent = "\u2713";
+        title.textContent = "Course Unlocked";
+        message.textContent = "Razorpay payment was verified successfully. All chapters and quizzes in this course are now available.";
+        localStorage.removeItem(LEARNLOOT_PENDING_COURSE_KEY);
+        refreshButton.outerHTML = `<a class="primary" href="/?courseId=${encodeURIComponent(courseId)}#courses">Start Learning</a>`;
+      }
+
+      async function refreshStatus() {
+        const user = firebase.auth().currentUser;
+        if (!user) {
+          setPendingState("Please sign in with the same LearnLoot account used to start this payment.");
+          return false;
+        }
+
+        refreshButton.disabled = true;
+        refreshButton.textContent = "Verifying...";
+        try {
+          const token = await user.getIdToken();
+          const response = await fetch(`${backendBaseUrl}/api/payments/purchases`, {
+            headers: {
+              Authorization: `Bearer ${token}`,
+              "Content-Type": "application/json"
+            }
+          });
+          const payload = await response.json().catch(() => ({}));
+          if (!response.ok) throw new Error(payload.error || "Could not verify payment.");
+          const purchased = Array.isArray(payload.purchasedCourseIds)
+            && payload.purchasedCourseIds.includes(courseId);
+          if (purchased) {
+            setUnlockedState();
+            return true;
+          }
+          setPendingState("Payment is not verified yet. The course remains locked until Razorpay's signed webhook is verified.");
+          return false;
+        } catch (error) {
+          setPendingState(error.message || "Could not verify payment status. Please try again.");
+          return false;
+        } finally {
+          if (document.body.contains(refreshButton)) {
+            refreshButton.disabled = false;
+            refreshButton.textContent = "Refresh Unlock Status";
+          }
+        }
+      }
+
+      if (!isKnownPaymentCourse(courseId)) {
+        coursePanel.style.display = "none";
+        setPendingState("The course reference was not found. Please contact support with your Razorpay payment ID.");
+      } else {
+        document.getElementById("course-name").textContent = paymentCourseNames[courseId];
+        document.getElementById("course-id").textContent = courseId;
+      }
+
+      refreshButton.addEventListener("click", refreshStatus);
+      firebase.initializeApp(window.firebaseConfig);
+      firebase.auth().onAuthStateChanged(async (user) => {
+        if (!user || !isKnownPaymentCourse(courseId)) {
+          if (!user) setPendingState("Please sign in to verify and access your purchased course.");
+          return;
+        }
+
+        if (await refreshStatus()) return;
+        const poll = window.setInterval(async () => {
+          refreshAttempts += 1;
+          const verified = await refreshStatus();
+          if (verified || refreshAttempts >= 10) window.clearInterval(poll);
+        }, 3000);
+      });
     })();
   </script>
 </body>

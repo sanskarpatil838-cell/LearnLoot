@@ -25,7 +25,7 @@
   };
 </script>
 <script defer src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js"></script>
-<link rel="stylesheet" href="styles.css?v=20260606-payment-links-v1"/>
+<link rel="stylesheet" href="styles.css?v=20260606-secure-payments-v3"/>
 </head>
 <body class="dark">
 
@@ -354,6 +354,11 @@
     </div>
 
     <div class="admin-section">
+      <h3>Verified Course Purchases</h3>
+      <div id="admin-payments-list"></div>
+    </div>
+
+    <div class="admin-section">
       <h3>Leaderboard Snapshot</h3>
       <div id="admin-leaderboard-list"></div>
     </div>
@@ -517,20 +522,17 @@
     </div>
     <h2 id="pending-payment-title">Complete Your Purchase</h2>
     <p>
-      Finish the payment in the Razorpay tab. After Razorpay shows
-      <strong>Payment Completed</strong>, return here and unlock your course.
+      Your course unlocks only after Razorpay verifies the payment and LearnLoot
+      receives the signed payment confirmation.
     </p>
     <div class="pending-course-summary">
       <span>Selected course</span>
       <strong id="pending-payment-course-name">LearnLoot course</strong>
     </div>
     <div class="learnloot-modal-actions pending-payment-actions">
-      <button class="modal-cancel-btn" type="button" onclick="closePendingPaymentModal()">Not Yet</button>
-      <button class="modal-cancel-btn reopen-payment-btn" type="button" onclick="reopenPendingPaymentLink()">
-        <i class="fas fa-arrow-up-right-from-square"></i> Open Razorpay
-      </button>
-      <button class="buy-now-btn confirm-payment-btn" type="button" onclick="confirmPendingCoursePurchase()">
-        <i class="fas fa-circle-check"></i> Payment Completed
+      <button class="modal-cancel-btn" type="button" onclick="closePendingPaymentModal()">Close</button>
+      <button class="buy-now-btn confirm-payment-btn" id="refresh-purchase-status-btn" type="button" onclick="refreshPendingPurchaseStatus()">
+        <i class="fas fa-rotate"></i> Refresh Unlock Status
       </button>
     </div>
   </div>
@@ -573,8 +575,8 @@
 <script defer src="https://www.gstatic.com/firebasejs/12.12.1/firebase-functions-compat.js"></script>
 <script defer src="https://www.gstatic.com/firebasejs/12.12.1/firebase-app-check-compat.js"></script>
 <script defer src="firebase-config.js?v=20260605-local-backend-default-v1"></script>
-<script src="payment-config.js?v=20260606-payment-return-v2" defer></script>
-<script src="script.js?v=20260606-payment-return-v2" defer></script>
+<script src="payment-config.js?v=20260606-secure-payments-v3" defer></script>
+<script src="script.js?v=20260606-secure-payments-v3" defer></script>
 <script defer>
   (function hardenBackendCalls() {
     function getAppCheckConfig() {

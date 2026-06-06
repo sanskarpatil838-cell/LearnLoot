@@ -1701,6 +1701,12 @@ body.dark .referral-success-note {
   box-shadow: 0 16px 40px rgba(34,197,94,0.38);
 }
 
+.confirm-payment-btn:disabled {
+  cursor: wait;
+  opacity: 0.72;
+  transform: none;
+}
+
 .course-toolbar {
   grid-column: 1 / -1;
   background: var(--card-bg);

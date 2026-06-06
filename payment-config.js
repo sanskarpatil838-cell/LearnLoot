@@ -1,18 +1,3 @@
-const paymentLinks = Object.freeze({
-  "jee-class-11-maths": "https://rzp.io/rzp/jek6idxV",
-  "jee-class-12-maths": "https://rzp.io/rzp/SMxIcvR",
-  "jee-class-11-physics": "https://rzp.io/rzp/BXwtJRuo",
-  "jee-class-12-physics": "https://rzp.io/rzp/t28EXIhZ",
-  "jee-class-11-chemistry": "https://rzp.io/rzp/ueCjbRI",
-  "jee-class-12-chemistry": "https://rzp.io/rzp/ejLnBuB",
-  "mhtcet-class-11-maths": "https://rzp.io/rzp/1c0ghHi",
-  "mhtcet-class-12-maths": "https://rzp.io/rzp/X5wcsQvr",
-  "mhtcet-class-11-physics": "https://rzp.io/rzp/rXym8Os",
-  "mhtcet-class-12-physics": "https://rzp.io/rzp/idtwLW0",
-  "mhtcet-class-11-chemistry": "https://rzp.io/rzp/62QKyS6",
-  "mhtcet-class-12-chemistry": "https://rzp.io/rzp/mNBjw6c"
-});
-
 const paymentCourseNames = Object.freeze({
   "jee-class-11-maths": "JEE Class 11 Mathematics",
   "jee-class-12-maths": "JEE Class 12 Mathematics",
@@ -29,42 +14,34 @@ const paymentCourseNames = Object.freeze({
 });
 
 const LEARNLOOT_PENDING_COURSE_KEY = "learnloot_pending_course";
-const LEARNLOOT_PURCHASED_COURSES_KEY = "learnloot_purchased_courses";
-
-// NOTE:
-// This localStorage unlock system is for testing/demo.
-// For production, verify Razorpay payment using webhook/backend
-// and store purchased courses in Firebase/Firestore per logged-in user.
+const verifiedPurchasedCourseIds = new Set();
+let paymentStartInProgress = false;
 
 function isKnownPaymentCourse(courseId) {
-  return Boolean(paymentLinks[String(courseId || "").trim()]);
+  return Boolean(paymentCourseNames[String(courseId || "").trim()]);
 }
 
 function getPurchasedCourses() {
-  try {
-    const storedValue = JSON.parse(localStorage.getItem(LEARNLOOT_PURCHASED_COURSES_KEY) || "[]");
-    if (!Array.isArray(storedValue)) return [];
-    return Array.from(new Set(storedValue.filter(isKnownPaymentCourse)));
-  } catch (error) {
-    console.warn("Could not read purchased LearnLoot courses:", error);
-    return [];
-  }
+  return Array.from(verifiedPurchasedCourseIds);
 }
 
-function markCoursePurchased(courseId) {
-  const normalizedCourseId = String(courseId || "").trim();
-  if (!isKnownPaymentCourse(normalizedCourseId)) return false;
-
-  const purchasedCourses = getPurchasedCourses();
-  if (!purchasedCourses.includes(normalizedCourseId)) {
-    purchasedCourses.push(normalizedCourseId);
-    localStorage.setItem(LEARNLOOT_PURCHASED_COURSES_KEY, JSON.stringify(purchasedCourses));
+function setVerifiedPurchasedCourses(courseIds = []) {
+  verifiedPurchasedCourseIds.clear();
+  if (Array.isArray(courseIds)) {
+    courseIds
+      .map((courseId) => String(courseId || "").trim())
+      .filter(isKnownPaymentCourse)
+      .forEach((courseId) => verifiedPurchasedCourseIds.add(courseId));
   }
-  return true;
+  return getPurchasedCourses();
+}
+
+function clearVerifiedPurchasedCourses() {
+  verifiedPurchasedCourseIds.clear();
 }
 
 function isCoursePurchased(courseId) {
-  return getPurchasedCourses().includes(String(courseId || "").trim());
+  return verifiedPurchasedCourseIds.has(String(courseId || "").trim());
 }
 
 function isFreeDemoQuiz(chapterIndex, quizIndex) {
@@ -80,42 +57,63 @@ function getPendingCourseId() {
   return isKnownPaymentCourse(courseId) ? courseId : "";
 }
 
-function openCoursePaymentLink(courseId) {
-  const normalizedCourseId = String(courseId || "").trim();
-  const link = paymentLinks[normalizedCourseId];
-
-  if (!link) {
-    alert("Payment link is not added for this course yet.");
-    return false;
-  }
-
-  const paymentWindow = window.open(link, "_blank");
-  if (paymentWindow) {
-    paymentWindow.opener = null;
-    return true;
-  }
-
-  window.location.href = link;
-  return false;
-}
-
-function buyCourse(courseId) {
+async function buyCourse(courseId) {
   const normalizedCourseId = String(courseId || "").trim();
   if (!isKnownPaymentCourse(normalizedCourseId)) {
-    alert("Payment link is not added for this course yet.");
+    alert("Payment is not available for this course yet.");
     return;
   }
 
-  localStorage.setItem(LEARNLOOT_PENDING_COURSE_KEY, normalizedCourseId);
-  const openedInNewTab = openCoursePaymentLink(normalizedCourseId);
-  if (openedInNewTab && typeof window.showPendingPaymentModal === "function") {
-    window.showPendingPaymentModal(normalizedCourseId);
+  const signedInUser = typeof firebase !== "undefined" && firebase.auth
+    ? firebase.auth().currentUser
+    : null;
+  if (!signedInUser) {
+    alert("Please login before buying this course.");
+    if (typeof window.showLoginScreen === "function") window.showLoginScreen();
+    return;
+  }
+
+  if (paymentStartInProgress) return;
+  paymentStartInProgress = true;
+
+  try {
+    if (typeof window.callBackend !== "function") {
+      throw new Error("Secure payment service is unavailable.");
+    }
+
+    const result = await window.callBackend("/api/payments/create-link", {
+      method: "POST",
+      body: { courseId: normalizedCourseId }
+    });
+
+    if (result.alreadyPurchased) {
+      setVerifiedPurchasedCourses([...getPurchasedCourses(), normalizedCourseId]);
+      localStorage.removeItem(LEARNLOOT_PENDING_COURSE_KEY);
+      if (typeof window.refreshCoursePurchaseUI === "function") window.refreshCoursePurchaseUI();
+      if (typeof window.showPointsNotification === "function") {
+        window.showPointsNotification("This course is already purchased.", "points-added");
+      }
+      return;
+    }
+
+    if (!result.success || !result.paymentUrl) {
+      throw new Error("Unable to start payment. Please try again.");
+    }
+
+    localStorage.setItem(LEARNLOOT_PENDING_COURSE_KEY, normalizedCourseId);
+    window.location.href = result.paymentUrl;
+  } catch (error) {
+    console.error("Secure payment start failed:", error);
+    alert(error.message || "Payment could not be started. Please try again.");
+  } finally {
+    paymentStartInProgress = false;
   }
 }
 
 window.LearnLootPayments = Object.freeze({
-  paymentLinks,
   paymentCourseNames,
   pendingCourseKey: LEARNLOOT_PENDING_COURSE_KEY,
-  purchasedCoursesKey: LEARNLOOT_PURCHASED_COURSES_KEY
+  getPurchasedCourses,
+  setVerifiedPurchasedCourses,
+  clearVerifiedPurchasedCourses
 });

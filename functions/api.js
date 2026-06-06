@@ -10,6 +10,7 @@ const { normalizeMathSymbols, hasBrokenMathFragments, toReadableMathText } = req
 const app = express();
 const MAX_ADMIN_USERS = Number(process.env.MAX_ADMIN_USERS || 200);
 const MAX_ADMIN_ATTEMPTS = Number(process.env.MAX_ADMIN_ATTEMPTS || 250);
+const MAX_ADMIN_PAYMENTS = Number(process.env.MAX_ADMIN_PAYMENTS || 250);
 const MAX_LEADERBOARD_USERS = Number(process.env.MAX_LEADERBOARD_USERS || 10);
 const POINTS_PER_QUESTION = 50;
 const INCORRECT_POINTS_PENALTY = 50;
@@ -38,6 +39,22 @@ const MAX_ADMIN_REFERRALS = Number(process.env.MAX_ADMIN_REFERRALS || 200);
 const WITHDRAWAL_STATUSES = new Set(['Pending', 'Approved', 'Rejected', 'Paid']);
 const WITHDRAWAL_DEDUCTION_STATUSES = new Set(['Approved', 'Paid']);
 const WITHDRAWAL_SUBMIT_COOLDOWN_MS = Number(process.env.WITHDRAWAL_SUBMIT_COOLDOWN_MS || 30 * 1000);
+const RAZORPAY_API_BASE_URL = 'https://api.razorpay.com/v1';
+const PAYMENT_SUCCESS_URL = 'https://learnloot.in/payment-success.html';
+const COURSE_PRICING = Object.freeze({
+  'jee-class-11-maths': Object.freeze({ amountPaise: 149900, name: 'JEE Class 11 Mathematics' }),
+  'jee-class-12-maths': Object.freeze({ amountPaise: 149900, name: 'JEE Class 12 Mathematics' }),
+  'jee-class-11-physics': Object.freeze({ amountPaise: 149900, name: 'JEE Class 11 Physics' }),
+  'jee-class-12-physics': Object.freeze({ amountPaise: 149900, name: 'JEE Class 12 Physics' }),
+  'jee-class-11-chemistry': Object.freeze({ amountPaise: 149900, name: 'JEE Class 11 Chemistry' }),
+  'jee-class-12-chemistry': Object.freeze({ amountPaise: 149900, name: 'JEE Class 12 Chemistry' }),
+  'mhtcet-class-11-maths': Object.freeze({ amountPaise: 99900, name: 'MHT-CET Class 11 Mathematics' }),
+  'mhtcet-class-12-maths': Object.freeze({ amountPaise: 99900, name: 'MHT-CET Class 12 Mathematics' }),
+  'mhtcet-class-11-physics': Object.freeze({ amountPaise: 99900, name: 'MHT-CET Class 11 Physics' }),
+  'mhtcet-class-12-physics': Object.freeze({ amountPaise: 99900, name: 'MHT-CET Class 12 Physics' }),
+  'mhtcet-class-11-chemistry': Object.freeze({ amountPaise: 99900, name: 'MHT-CET Class 11 Chemistry' }),
+  'mhtcet-class-12-chemistry': Object.freeze({ amountPaise: 99900, name: 'MHT-CET Class 12 Chemistry' })
+});
 const adminEmails = new Set(
   String(process.env.ADMIN_EMAILS || 'sanskarpatil838@gmail.com')
     .split(',')
@@ -63,6 +80,11 @@ app.use((req, res, next) => {
 });
 
 app.use(cors({ origin: getAllowedOrigins(), credentials: true }));
+app.post(
+  '/api/payments/razorpay-webhook',
+  express.raw({ type: 'application/json', limit: '1mb' }),
+  handleRazorpayWebhook
+);
 app.use(express.json({ limit: '8mb' }));
 
 if (!admin.apps.length) {
@@ -85,6 +107,298 @@ function createHttpError(status, message) {
   const error = new Error(message);
   error.status = status;
   return error;
+}
+
+function getCoursePricing(courseId) {
+  return COURSE_PRICING[String(courseId || '').trim()] || null;
+}
+
+function getRequiredSecret(name) {
+  const value = String(process.env[name] || '').trim();
+  if (!value) {
+    throw createHttpError(503, 'Secure payments are temporarily unavailable.');
+  }
+  return value;
+}
+
+function getRawWebhookBody(req) {
+  if (Buffer.isBuffer(req.rawBody)) return req.rawBody;
+  if (Buffer.isBuffer(req.body)) return req.body;
+  throw createHttpError(400, 'Raw webhook body is required.');
+}
+
+function verifyRazorpayWebhookSignature(rawBody, signature) {
+  const secret = getRequiredSecret('RAZORPAY_WEBHOOK_SECRET');
+  const suppliedSignature = String(signature || '').trim();
+  if (!suppliedSignature || !/^[a-f0-9]{64}$/i.test(suppliedSignature)) return false;
+
+  const expectedSignature = crypto
+    .createHmac('sha256', secret)
+    .update(rawBody)
+    .digest('hex');
+  const expectedBuffer = Buffer.from(expectedSignature, 'utf8');
+  const suppliedBuffer = Buffer.from(suppliedSignature, 'utf8');
+  return expectedBuffer.length === suppliedBuffer.length
+    && crypto.timingSafeEqual(expectedBuffer, suppliedBuffer);
+}
+
+function getRazorpayEventEntities(event = {}) {
+  const payload = event && typeof event.payload === 'object' ? event.payload : {};
+  return {
+    paymentLink: payload.payment_link?.entity || {},
+    payment: payload.payment?.entity || {},
+    order: payload.order?.entity || {}
+  };
+}
+
+function getRazorpayNotes(...entities) {
+  return entities.reduce((notes, entity) => {
+    if (entity && entity.notes && typeof entity.notes === 'object' && !Array.isArray(entity.notes)) {
+      Object.assign(notes, entity.notes);
+    }
+    return notes;
+  }, {});
+}
+
+function getVerifiedPaymentDetails(event = {}) {
+  const eventType = String(event.event || '').trim();
+  if (!['payment_link.paid', 'payment.captured'].includes(eventType)) return null;
+
+  const { paymentLink, payment, order } = getRazorpayEventEntities(event);
+  const notes = getRazorpayNotes(order, payment, paymentLink);
+  const courseId = String(notes.courseId || notes.course_id || '').trim();
+  const uid = String(notes.uid || notes.userId || notes.user_id || '').trim();
+  const pricing = getCoursePricing(courseId);
+  const paymentStatus = String(payment.status || '').toLowerCase();
+  const paymentLinkStatus = String(paymentLink.status || '').toLowerCase();
+  const amountPaise = toInteger(
+    payment.amount
+    || paymentLink.amount_paid
+    || order.amount_paid
+    || paymentLink.amount
+    || order.amount
+  );
+
+  if (eventType === 'payment.captured' && (!pricing || !uid)) return null;
+  if (!pricing) throw createHttpError(400, 'Webhook contains an invalid course id.');
+  if (!/^[A-Za-z0-9_-]{8,160}$/.test(uid)) throw createHttpError(400, 'Webhook is missing a valid user id.');
+  if (amountPaise !== pricing.amountPaise) throw createHttpError(400, 'Webhook payment amount does not match the course price.');
+  if (eventType === 'payment.captured' && paymentStatus !== 'captured') {
+    throw createHttpError(400, 'Payment is not captured.');
+  }
+  if (
+    eventType === 'payment_link.paid'
+    && paymentLinkStatus !== 'paid'
+    && paymentStatus !== 'captured'
+  ) {
+    throw createHttpError(400, 'Payment Link is not paid.');
+  }
+
+  const razorpayPaymentId = String(payment.id || '').trim();
+  if (!/^pay_[A-Za-z0-9]+$/.test(razorpayPaymentId)) {
+    throw createHttpError(400, 'Webhook is missing a valid Razorpay payment id.');
+  }
+
+  const currency = String(payment.currency || paymentLink.currency || order.currency || 'INR').toUpperCase();
+  if (currency !== 'INR') throw createHttpError(400, 'Webhook payment currency must be INR.');
+
+  return {
+    uid,
+    userEmail: clampText(notes.email, 254).toLowerCase(),
+    courseId,
+    courseName: pricing.name,
+    amountPaise,
+    amount: amountPaise / 100,
+    currency,
+    razorpayPaymentId,
+    razorpayPaymentLinkId: String(paymentLink.id || notes.paymentLinkId || '').trim(),
+    rawEventType: eventType,
+    eventCreatedAt: toInteger(event.created_at)
+  };
+}
+
+async function handleRazorpayWebhook(req, res) {
+  try {
+    const rawBody = getRawWebhookBody(req);
+    const signature = req.get('x-razorpay-signature');
+    if (!verifyRazorpayWebhookSignature(rawBody, signature)) {
+      res.status(401).json({ error: 'Invalid Razorpay webhook signature.' });
+      return;
+    }
+
+    const event = JSON.parse(rawBody.toString('utf8'));
+    const paymentDetails = getVerifiedPaymentDetails(event);
+    if (!paymentDetails) {
+      res.status(200).json({ ok: true, ignored: true });
+      return;
+    }
+
+    const userRef = db.collection('users').doc(paymentDetails.uid);
+    const purchaseRef = userRef.collection('purchases').doc(paymentDetails.courseId);
+    const paymentRef = db.collection('payments').doc(paymentDetails.razorpayPaymentId);
+    const nowMs = Date.now();
+
+    await db.runTransaction(async (transaction) => {
+      const [userSnapshot, paymentSnapshot] = await Promise.all([
+        transaction.get(userRef),
+        transaction.get(paymentRef)
+      ]);
+
+      if (!userSnapshot.exists) {
+        throw createHttpError(400, 'Payment user does not exist.');
+      }
+
+      if (paymentSnapshot.exists) {
+        const existing = paymentSnapshot.data() || {};
+        if (
+          String(existing.uid || '') !== paymentDetails.uid
+          || String(existing.courseId || '') !== paymentDetails.courseId
+        ) {
+          throw createHttpError(409, 'Payment is already assigned to another purchase.');
+        }
+      }
+
+      const purchaseData = {
+        courseId: paymentDetails.courseId,
+        courseName: paymentDetails.courseName,
+        status: 'active',
+        paymentStatus: 'paid',
+        razorpayPaymentId: paymentDetails.razorpayPaymentId,
+        razorpayPaymentLinkId: paymentDetails.razorpayPaymentLinkId,
+        amount: paymentDetails.amount,
+        amountPaise: paymentDetails.amountPaise,
+        currency: paymentDetails.currency,
+        source: 'razorpay',
+        purchasedAt: serverTimestamp(),
+        purchasedAtMs: nowMs,
+        updatedAt: serverTimestamp()
+      };
+
+      transaction.set(purchaseRef, purchaseData, { merge: true });
+      transaction.set(paymentRef, {
+        ...paymentDetails,
+        status: 'paid',
+        paymentStatus: 'paid',
+        createdAt: serverTimestamp(),
+        createdAtMs: nowMs,
+        updatedAt: serverTimestamp()
+      }, { merge: true });
+    });
+
+    res.status(200).json({ ok: true });
+  } catch (error) {
+    console.error('Razorpay webhook processing failed:', error);
+    const status = Number(error.status || 500);
+    res.status(status).json({
+      error: status >= 500 ? 'Webhook processing failed.' : error.message
+    });
+  }
+}
+
+async function createRazorpayPaymentLink(decoded, courseId) {
+  const pricing = getCoursePricing(courseId);
+  if (!pricing) throw createHttpError(400, 'Invalid course id.');
+
+  const existingPurchase = await db.collection('users')
+    .doc(decoded.uid)
+    .collection('purchases')
+    .doc(courseId)
+    .get();
+  if (existingPurchase.exists && existingPurchase.data()?.status === 'active') {
+    return { alreadyPurchased: true };
+  }
+
+  const keyId = getRequiredSecret('RAZORPAY_KEY_ID');
+  const keySecret = getRequiredSecret('RAZORPAY_KEY_SECRET');
+  const referenceId = `LL${Date.now().toString(36)}${crypto.randomBytes(6).toString('hex')}`;
+  const email = clampText(decoded.email, 254).toLowerCase();
+  const requestBody = {
+    amount: pricing.amountPaise,
+    currency: 'INR',
+    accept_partial: false,
+    reference_id: referenceId,
+    description: `LearnLoot ${pricing.name} Course`,
+    callback_url: `${PAYMENT_SUCCESS_URL}?courseId=${encodeURIComponent(courseId)}`,
+    callback_method: 'get',
+    notes: {
+      uid: decoded.uid,
+      courseId,
+      email
+    }
+  };
+  if (email) requestBody.customer = { email };
+
+  const response = await fetch(`${RAZORPAY_API_BASE_URL}/payment_links`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Basic ${Buffer.from(`${keyId}:${keySecret}`).toString('base64')}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify(requestBody)
+  });
+  const responseBody = await response.json().catch(() => ({}));
+  if (!response.ok || !responseBody.short_url || !responseBody.id) {
+    console.error('Razorpay Payment Link creation failed:', {
+      status: response.status,
+      error: responseBody.error?.description || responseBody.error?.reason || 'Unknown Razorpay error'
+    });
+    throw createHttpError(502, 'Unable to start secure payment. Please try again.');
+  }
+
+  const nowMs = Date.now();
+  await Promise.all([
+    db.collection('paymentIntents').doc(responseBody.id).set({
+      uid: decoded.uid,
+      userEmail: email,
+      courseId,
+      courseName: pricing.name,
+      amount: pricing.amountPaise / 100,
+      amountPaise: pricing.amountPaise,
+      currency: 'INR',
+      referenceId,
+      razorpayPaymentLinkId: responseBody.id,
+      status: 'created',
+      createdAt: serverTimestamp(),
+      createdAtMs: nowMs
+    }, { merge: true }),
+    db.collection('users').doc(decoded.uid).collection('paymentIntents').doc(responseBody.id).set({
+      courseId,
+      courseName: pricing.name,
+      amount: pricing.amountPaise / 100,
+      amountPaise: pricing.amountPaise,
+      currency: 'INR',
+      referenceId,
+      razorpayPaymentLinkId: responseBody.id,
+      status: 'created',
+      createdAt: serverTimestamp(),
+      createdAtMs: nowMs
+    }, { merge: true })
+  ]);
+
+  return {
+    alreadyPurchased: false,
+    paymentUrl: responseBody.short_url,
+    paymentLinkId: responseBody.id
+  };
+}
+
+async function getUserPurchases(uid) {
+  const snapshot = await db.collection('users').doc(uid).collection('purchases').get();
+  const purchases = snapshot.docs
+    .map((doc) => ({ id: doc.id, ...doc.data() }))
+    .filter((purchase) => purchase.status === 'active' && getCoursePricing(purchase.id));
+  return {
+    purchases,
+    purchasedCourseIds: purchases.map((purchase) => purchase.id)
+  };
+}
+
+async function getAdminPayments() {
+  const snapshot = await db.collection('payments')
+    .orderBy('createdAtMs', 'desc')
+    .limit(MAX_ADMIN_PAYMENTS)
+    .get();
+  return snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
 }
 
 function clampText(value, maxLength, fallback = '') {
@@ -1058,16 +1372,38 @@ async function getAdminDashboardData() {
     attempts = await getAdminAttemptsFromUserDocs(userDocs, userMetaById);
   }
 
-  const [withdrawalRequests, referrals] = await Promise.all([
+  const [withdrawalRequests, referrals, payments] = await Promise.all([
     getAdminWithdrawalRequests(),
-    getAdminReferralRecords(userMetaById)
+    getAdminReferralRecords(userMetaById),
+    getAdminPayments()
   ]);
 
-  return { users, attempts, withdrawalRequests, referrals };
+  return { users, attempts, withdrawalRequests, referrals, payments };
 }
 
 app.get('/health', (req, res) => {
   res.json({ ok: true, service: 'jee-maths-master-backend' });
+});
+
+app.post('/api/payments/create-link', requireAuth, async (req, res, next) => {
+  try {
+    const courseId = String(req.body?.courseId || '').trim();
+    const result = await createRazorpayPaymentLink(req.auth, courseId);
+    res.status(result.alreadyPurchased ? 200 : 201).json({
+      success: true,
+      ...result
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/payments/purchases', requireAuth, async (req, res, next) => {
+  try {
+    res.json(await getUserPurchases(req.auth.uid));
+  } catch (error) {
+    next(error);
+  }
 });
 
 app.post('/api/profile', requireAuth, async (req, res, next) => {
@@ -1082,13 +1418,14 @@ app.post('/api/profile', requireAuth, async (req, res, next) => {
 app.get('/api/me', requireAuth, async (req, res, next) => {
   try {
     const profile = await ensureUserProfile(req.auth, {}, req);
-    const [attempts, leaderboard, referralHistory] = await Promise.all([
+    const [attempts, leaderboard, referralHistory, purchaseState] = await Promise.all([
       getUserAttempts(req.auth.uid),
       getLeaderboard(),
-      getUserReferralHistory(req.auth.uid)
+      getUserReferralHistory(req.auth.uid),
+      getUserPurchases(req.auth.uid)
     ]);
 
-    res.json({ profile, attempts, leaderboard, referralHistory });
+    res.json({ profile, attempts, leaderboard, referralHistory, ...purchaseState });
   } catch (error) {
     next(error);
   }
@@ -1708,5 +2045,10 @@ app.use((error, req, res, next) => {
 });
 
 module.exports = {
-  apiApp: app
+  apiApp: app,
+  paymentTestUtils: {
+    COURSE_PRICING,
+    getVerifiedPaymentDetails,
+    verifyRazorpayWebhookSignature
+  }
 };

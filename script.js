@@ -83,6 +83,7 @@ let adminUsers = [];
 let adminAttempts = [];
 let adminWithdrawalRequests = [];
 let adminReferrals = [];
+let adminPayments = [];
 let referralHistory = [];
 let adminLoadError = '';
 let pendingReferralSuccessMessage = '';
@@ -124,6 +125,7 @@ let adminRecordingValidationRun = 0;
 let adminRecordingAutoRefreshTimer = null;
 let offlineAutoSubmitInProgress = false;
 let pendingOfflineSubmitInProgress = false;
+let purchaseRefreshInProgress = false;
 
 function getDisplayAvatar(value) {
     const avatar = String(value || '').trim();
@@ -921,6 +923,8 @@ function resetUserState() {
     adminAttempts = [];
     adminWithdrawalRequests = [];
     adminReferrals = [];
+    adminPayments = [];
+    clearVerifiedPurchasedCourses();
     referralHistory = [];
     adminLoadError = '';
     pendingReferralSuccessMessage = '';
@@ -3357,6 +3361,7 @@ async function loadCloudData() {
         try {
             const response = await callBackend('/api/me');
             applyCloudProfile(response.profile);
+            setVerifiedPurchasedCourses(response.purchasedCourseIds || []);
             leaderboard = Array.isArray(response.leaderboard) ? response.leaderboard : [];
             leaderboardFetchedAt = Date.now();
             referralHistory = Array.isArray(response.referralHistory)
@@ -3380,9 +3385,10 @@ async function loadCloudData() {
     const userRef = db.collection('users').doc(currentUser.uid);
     const attemptsRef = userRef.collection('attempts');
 
-    const [userSnapshot, attemptsSnapshot] = await Promise.all([
+    const [userSnapshot, attemptsSnapshot, purchasesSnapshot] = await Promise.all([
         userRef.get(),
         attemptsRef.orderBy('timestamp', 'desc').limit(100).get(),
+        userRef.collection('purchases').get(),
         refreshLeaderboardFromCloud()
     ]);
 
@@ -3392,6 +3398,11 @@ async function loadCloudData() {
     totalTimeSpent = getNumericValue(userData.totalTimeSpent);
     totalCorrectAnswers = getNumericValue(userData.totalCorrectAnswers);
     totalQuestionsAttempted = getNumericValue(userData.totalQuestionsAttempted);
+    setVerifiedPurchasedCourses(
+        purchasesSnapshot.docs
+            .filter((docSnapshot) => docSnapshot.data()?.status === 'active')
+            .map((docSnapshot) => docSnapshot.id)
+    );
 
     testHistory = attemptsSnapshot.docs
         .map((docSnapshot) => normalizeAttemptData(docSnapshot.data(), currentUser))
@@ -3620,6 +3631,7 @@ async function loadAdminDashboardData() {
             adminReferrals = Array.isArray(response.referrals)
                 ? response.referrals.map((entry) => normalizeReferralRecord(entry))
                 : [];
+            adminPayments = Array.isArray(response.payments) ? response.payments : [];
             adminLoadError = '';
             renderAdminDashboard();
             return;
@@ -3682,6 +3694,20 @@ async function loadAdminDashboardData() {
     } catch (error) {
         console.warn('Referral record load failed:', error);
         adminReferrals = [];
+    }
+
+    try {
+        const paymentsSnapshot = await db.collection('payments')
+            .orderBy('createdAtMs', 'desc')
+            .limit(250)
+            .get();
+        adminPayments = paymentsSnapshot.docs.map((docSnapshot) => ({
+            id: docSnapshot.id,
+            ...docSnapshot.data()
+        }));
+    } catch (error) {
+        console.warn('Verified payment load failed:', error);
+        adminPayments = [];
     }
 
     adminLoadError = '';
@@ -3919,6 +3945,7 @@ function renderAdminDashboard() {
     const recordingsList = document.getElementById('admin-recordings-list');
     const withdrawalsList = document.getElementById('admin-withdrawal-requests-list');
     const referralsList = document.getElementById('admin-referrals-list');
+    const paymentsList = document.getElementById('admin-payments-list');
     const leaderboardList = document.getElementById('admin-leaderboard-list');
     const attemptsList = document.getElementById('admin-attempts-list');
 
@@ -3946,13 +3973,13 @@ function renderAdminDashboard() {
         if (adminLoadError) {
             statusEl.textContent = adminLoadError;
             statusEl.className = 'auth-status error';
-        } else if (adminUsers.length === 0 && adminAttempts.length === 0 && adminWithdrawalRequests.length === 0 && adminReferrals.length === 0) {
+        } else if (adminUsers.length === 0 && adminAttempts.length === 0 && adminWithdrawalRequests.length === 0 && adminReferrals.length === 0 && adminPayments.length === 0) {
             statusEl.textContent = 'Loading admin dashboard data...';
             statusEl.className = 'auth-status';
         } else {
             const recordingCount = adminAttempts.filter((attempt) => getSafeRecordingUrl(attempt.recordingUrl)).length;
             const pendingWithdrawals = adminWithdrawalRequests.filter((request) => request.status === 'Pending').length;
-            statusEl.textContent = `${adminUsers.length} users loaded | ${adminAttempts.length} attempt records loaded | ${recordingCount} recordings | ${pendingWithdrawals} pending withdrawals | ${adminReferrals.length} referrals`;
+            statusEl.textContent = `${adminUsers.length} users | ${adminAttempts.length} attempts | ${recordingCount} recordings | ${pendingWithdrawals} pending withdrawals | ${adminPayments.length} verified purchases`;
             statusEl.className = 'auth-status success';
         }
     }
@@ -3986,6 +4013,10 @@ function renderAdminDashboard() {
             <div class="stat-card">
                 <div class="stat-number">${completedReferrals}</div>
                 <div>Completed Referrals</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-number">${adminPayments.length}</div>
+                <div>Verified Purchases</div>
             </div>
         `;
     }
@@ -4021,6 +4052,28 @@ function renderAdminDashboard() {
 
     if (referralsList) {
         renderAdminReferralRecords(referralsList);
+    }
+
+    if (paymentsList) {
+        if (adminPayments.length === 0) {
+            paymentsList.innerHTML = '<div class="admin-empty">No verified course purchases yet.</div>';
+        } else {
+            paymentsList.className = 'admin-user-list';
+            paymentsList.innerHTML = adminPayments.map((payment) => `
+                <div class="leaderboard-item">
+                    <div class="lb-avatar"><i class="fas fa-receipt"></i></div>
+                    <div class="lb-info">
+                        <strong>${escapeHtml(payment.courseName || payment.courseId || 'Course purchase')}</strong>
+                        <span>${escapeHtml(payment.userEmail || payment.uid || 'Unknown user')}</span>
+                        <span>${escapeHtml(payment.razorpayPaymentId || payment.id || '')}</span>
+                    </div>
+                    <div class="lb-score">
+                        <strong>₹${Number(payment.amount || 0).toLocaleString('en-IN')}</strong>
+                        <span>${escapeHtml(payment.status || 'paid')} | ${formatDateTime(payment.purchasedAtMs || payment.createdAtMs)}</span>
+                    </div>
+                </div>
+            `).join('');
+        }
     }
 
     if (leaderboardList) {
@@ -4098,6 +4151,8 @@ async function openHomeForAuthenticatedUser(authUser) {
         adminUsers = [];
         adminAttempts = [];
         adminWithdrawalRequests = [];
+        adminReferrals = [];
+        adminPayments = [];
         adminLoadError = '';
         adminPanelVisible = Boolean(currentUser.isAdmin);
         resetAuthInputs();
@@ -5086,37 +5141,69 @@ function closePendingPaymentModal() {
     document.getElementById('pending-payment-modal')?.classList.remove('active');
 }
 
-function reopenPendingPaymentLink() {
-    const courseId = getPendingCourseId();
-    if (!courseId) {
-        closePendingPaymentModal();
-        showPointsNotification('No pending course purchase was found.', 'points-lost');
-        return;
-    }
-    openCoursePaymentLink(courseId);
-}
+async function refreshVerifiedPurchases(options = {}) {
+    const showFeedback = Boolean(options.showFeedback);
+    if (!currentUser || purchaseRefreshInProgress) return false;
 
-function confirmPendingCoursePurchase() {
-    const courseId = getPendingCourseId();
-    if (!courseId || !markCoursePurchased(courseId)) {
-        closePendingPaymentModal();
-        showPointsNotification('Could not find the pending course. Please contact support.', 'points-lost');
-        return;
+    purchaseRefreshInProgress = true;
+    const refreshButton = document.getElementById('refresh-purchase-status-btn');
+    if (refreshButton) {
+        refreshButton.disabled = true;
+        refreshButton.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Verifying';
     }
-
     const chapterContext = activeChapterPurchaseContext
         ? { ...activeChapterPurchaseContext }
         : null;
-    localStorage.removeItem(LEARNLOOT_PENDING_COURSE_KEY);
-    closePendingPaymentModal();
-    closeLockedQuizModal();
-    closeChapterPartsModal();
-    refreshCoursePurchaseUI();
-    generateChapterList();
-    if (chapterContext?.courseId === courseId && chapterContext.chapter) {
-        openChapterParts(chapterContext.chapter, chapterContext.chapterIndex);
+
+    try {
+        const response = await callBackend('/api/payments/purchases');
+        setVerifiedPurchasedCourses(response.purchasedCourseIds || []);
+        const pendingCourseId = getPendingCourseId();
+        const pendingCoursePurchased = pendingCourseId && isCoursePurchased(pendingCourseId);
+
+        if (pendingCoursePurchased) {
+            localStorage.removeItem(LEARNLOOT_PENDING_COURSE_KEY);
+            closePendingPaymentModal();
+            closeLockedQuizModal();
+        }
+
+        if (chapterContext) closeChapterPartsModal();
+        refreshCoursePurchaseUI();
+        generateChapterList();
+        if (
+            chapterContext?.chapter
+            && chapterContext.courseId
+            && isCoursePurchased(chapterContext.courseId)
+        ) {
+            openChapterParts(chapterContext.chapter, chapterContext.chapterIndex);
+        }
+
+        if (showFeedback) {
+            showPointsNotification(
+                pendingCoursePurchased
+                    ? `${paymentCourseNames[pendingCourseId] || 'Course'} unlocked successfully.`
+                    : 'Payment is not verified yet. The course remains locked.',
+                pendingCoursePurchased ? 'points-added' : 'points-lost'
+            );
+        }
+        return Boolean(pendingCoursePurchased);
+    } catch (error) {
+        console.error('Purchase verification refresh failed:', error);
+        if (showFeedback) {
+            showPointsNotification(error.message || 'Could not verify payment status.', 'points-lost');
+        }
+        return false;
+    } finally {
+        purchaseRefreshInProgress = false;
+        if (refreshButton) {
+            refreshButton.disabled = false;
+            refreshButton.innerHTML = '<i class="fas fa-rotate"></i> Refresh Unlock Status';
+        }
     }
-    showPointsNotification(`${paymentCourseNames[courseId] || 'Course'} unlocked successfully.`, 'points-added');
+}
+
+async function refreshPendingPurchaseStatus() {
+    await refreshVerifiedPurchases({ showFeedback: true });
 }
 
 function restorePendingPaymentPrompt() {
@@ -5126,7 +5213,10 @@ function restorePendingPaymentPrompt() {
         localStorage.removeItem(LEARNLOOT_PENDING_COURSE_KEY);
         return;
     }
-    window.setTimeout(() => showPendingPaymentModal(courseId), 250);
+    window.setTimeout(async () => {
+        const unlocked = await refreshVerifiedPurchases();
+        if (!unlocked && getPendingCourseId()) showPendingPaymentModal(courseId);
+    }, 250);
 }
 
 function openChapterParts(ch, chapterIndex = null) {
@@ -6000,7 +6090,7 @@ function refreshCoursePurchaseUI() {
         if (buyButton) {
             buyButton.hidden = purchased;
             buyButton.innerHTML = paymentPending
-                ? '<i class="fas fa-circle-check"></i> Complete Purchase'
+                ? '<i class="fas fa-rotate"></i> Check Payment'
                 : '<i class="fas fa-bag-shopping"></i> Buy Now';
             buyButton.setAttribute(
                 'onclick',
@@ -6014,7 +6104,7 @@ function refreshCoursePurchaseUI() {
             statusBadge.innerHTML = purchased
                 ? '<i class="fas fa-circle-check"></i> Purchased'
                 : (paymentPending
-                    ? '<i class="fas fa-clock"></i> Payment Pending'
+                    ? '<i class="fas fa-clock"></i> Verification Pending'
                     : '<i class="fas fa-gift"></i> Demo Available');
         }
     });
@@ -7138,6 +7228,9 @@ async function persistAttemptToCloud(attempt) {
                 adminReferrals = Array.isArray(response.adminDashboard.referrals)
                     ? response.adminDashboard.referrals.map((entry) => normalizeReferralRecord(entry))
                     : adminReferrals;
+                adminPayments = Array.isArray(response.adminDashboard.payments)
+                    ? response.adminDashboard.payments
+                    : adminPayments;
                 adminLoadError = '';
                 renderAdminDashboard();
             }
@@ -7640,13 +7733,15 @@ function id(s) { return document.getElementById(s); }
 // ===== INIT =====
 // ============================================================
 document.addEventListener('DOMContentLoaded', refreshCoursePurchaseUI);
-window.addEventListener('focus', () => {
-    if (currentUser && getPendingCourseId() && !document.getElementById('pending-payment-modal')?.classList.contains('active')) {
+window.addEventListener('focus', async () => {
+    if (!currentUser || !getPendingCourseId()) return;
+    const unlocked = await refreshVerifiedPurchases();
+    if (!unlocked && !document.getElementById('pending-payment-modal')?.classList.contains('active')) {
         showPendingPaymentModal();
     }
 });
 window.addEventListener('storage', (event) => {
-    if (event.key === LEARNLOOT_PURCHASED_COURSES_KEY || event.key === LEARNLOOT_PENDING_COURSE_KEY) {
+    if (event.key === LEARNLOOT_PENDING_COURSE_KEY) {
         refreshCoursePurchaseUI();
     }
 });
