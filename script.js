@@ -809,6 +809,11 @@ function initApp() {
 
     // Keyboard shortcuts
     document.addEventListener('keydown', function(e) {
+        if (e.key === 'Escape' && document.getElementById('locked-quiz-modal')?.classList.contains('active')) {
+            closeLockedQuizModal();
+            return;
+        }
+
         if (e.key === 'Escape' && document.getElementById('withdraw-modal')?.style.display !== 'none') {
             closeWithdrawModal();
             return;
@@ -4361,8 +4366,15 @@ async function showHomeScreen() {
     const msgs = ['Ready to ace JEE today?', 'Keep up the great work!', 'Every question counts!', 'Sharpen your skills!'];
     document.getElementById('welcome-sub').textContent = msgs[Math.floor(Math.random() * msgs.length)];
 
+    selectedMegaCourseId = '';
     selectedCourseId = '';
+    const requestedPaymentCourseId = selectRequestedPaymentCourse();
     generateChapterList();
+    if (requestedPaymentCourseId) {
+        window.setTimeout(() => {
+            document.getElementById('chapter-section-title')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }, 150);
+    }
     updateWallet();
     renderLeaderboard();
     renderCharts();
@@ -5014,13 +5026,45 @@ function selectDifficulty() {
 function closeChapterPartsModal() {
     const modal = document.getElementById('chapter-parts-modal');
     if (modal) modal.remove();
+    activeChapterPurchaseContext = null;
 }
 
 function getAttemptLabel() {
     return currentPartLabel || DIFF_LABELS[currentDifficulty] || 'All Questions';
 }
 
-function openChapterParts(ch) {
+function getQuizAccessContext(chapterName, partNumber = 1) {
+    const matchingActiveContext = activeChapterPurchaseContext?.chapter === chapterName
+        ? activeChapterPurchaseContext
+        : null;
+    return {
+        courseId: matchingActiveContext?.courseId || getSelectedPaymentCourseId(),
+        chapterIndex: Number.isInteger(matchingActiveContext?.chapterIndex)
+            ? matchingActiveContext.chapterIndex
+            : getSelectedCourseChapterIndex(chapterName),
+        quizIndex: Math.max(0, Number(partNumber || 1) - 1)
+    };
+}
+
+function showLockedQuizModal(courseId) {
+    lockedQuizCourseId = String(courseId || '').trim();
+    const modal = document.getElementById('locked-quiz-modal');
+    if (!modal) return;
+    modal.classList.add('active');
+}
+
+function closeLockedQuizModal() {
+    lockedQuizCourseId = '';
+    document.getElementById('locked-quiz-modal')?.classList.remove('active');
+}
+
+function buyLockedQuizCourse() {
+    const courseId = lockedQuizCourseId;
+    closeLockedQuizModal();
+    buyCourse(courseId);
+}
+
+function openChapterParts(ch, chapterIndex = null) {
     closeChapterPartsModal();
 
     const chapterTitle = getChapterDisplayName(ch);
@@ -5031,21 +5075,44 @@ function openChapterParts(ch) {
     }
 
     const totalParts = getChapterPartCount(ch);
+    const resolvedChapterIndex = chapterIndex !== null
+        && chapterIndex !== ''
+        && Number.isInteger(Number(chapterIndex))
+        ? Number(chapterIndex)
+        : getSelectedCourseChapterIndex(ch);
+    const paymentCourseId = getSelectedPaymentCourseId();
+    const coursePurchased = isCoursePurchased(paymentCourseId);
+    activeChapterPurchaseContext = {
+        chapter: ch,
+        chapterIndex: resolvedChapterIndex,
+        courseId: paymentCourseId
+    };
     const pausedInfo = pausedTestState?.chapter === ch
         ? getChapterPartInfo(ch, pausedTestState.partNumber || 1)
         : null;
 
     const partsHtml = range(1, totalParts).map((partNumber) => {
         const info = getChapterPartInfo(ch, partNumber);
+        const quizIndex = partNumber - 1;
+        const accessible = canAccessQuiz(paymentCourseId, resolvedChapterIndex, quizIndex);
+        const isDemo = !coursePurchased && isFreeDemoQuiz(resolvedChapterIndex, quizIndex);
+        const isLocked = !accessible;
         const isPausedPart = pausedInfo && pausedInfo.partNumber === partNumber;
         const isAttemptedPart = hasAttemptedQuizPart(ch, partNumber);
-        const actionLabel = isAttemptedPart ? 'Attempted' : (isPausedPart ? 'Resume Quiz' : 'Start Quiz');
-        const actionIcon = isAttemptedPart ? 'fa-circle-check' : 'fa-play';
+        const actionLabel = isLocked
+            ? 'Locked'
+            : (isAttemptedPart ? 'Attempted' : (isPausedPart ? 'Resume Quiz' : 'Start Quiz'));
+        const actionIcon = isLocked ? 'fa-lock' : (isAttemptedPart ? 'fa-circle-check' : 'fa-play');
+        const clickAction = isLocked
+            ? `onclick="showLockedQuizModal('${paymentCourseId}')"`
+            : (isAttemptedPart ? 'disabled' : `onclick='startTest(${escapeHtml(JSON.stringify(ch))}, ${partNumber})'`);
         return `
-            <button class="part-option ${isPausedPart ? 'paused' : ''} ${isAttemptedPart ? 'attempted' : ''}" ${isAttemptedPart ? 'disabled' : `onclick='startTest(${escapeHtml(JSON.stringify(ch))}, ${partNumber})'`}>
+            <button class="part-option ${isPausedPart && !isLocked ? 'paused' : ''} ${isAttemptedPart && !isLocked ? 'attempted' : ''} ${isLocked ? 'locked-quiz' : ''}" type="button" ${clickAction}>
                 <span class="part-number">Quiz ${partNumber}</span>
                 <span class="part-range">Random quiz from ${totalQs} questions</span>
                 <span class="part-count">${info.questionCount} questions${isAttemptedPart ? ' | Already attempted' : (isPausedPart ? ' | Resume available' : '')}</span>
+                ${isLocked ? '<span class="lock-badge"><i class="fas fa-lock"></i> Locked</span>' : ''}
+                ${isDemo ? '<span class="demo-badge"><i class="fas fa-gift"></i> Free Demo</span>' : ''}
                 <span class="part-action"><i class="fas ${actionIcon}"></i> ${actionLabel}</span>
             </button>`;
     }).join('');
@@ -5466,6 +5533,8 @@ let elapsedTimeBeforePauseMs = 0;
 let liveDemoWalletBalance = 0;
 let selectedMegaCourseId = '';
 let selectedCourseId = '';
+let activeChapterPurchaseContext = null;
+let lockedQuizCourseId = '';
 let pageExitInProgress = false;
 let hiddenViolationTimeout = null;
 
@@ -5703,6 +5772,25 @@ const JEE_COURSE_OVERRIDES = {
     }
 };
 
+const PAYMENT_COURSE_IDS = Object.freeze({
+    'mht-cet-course': Object.freeze({
+        'class-11-math': 'mhtcet-class-11-maths',
+        'class-12-math': 'mhtcet-class-12-maths',
+        'class-11-physics': 'mhtcet-class-11-physics',
+        'class-12-physics': 'mhtcet-class-12-physics',
+        'class-11-chemistry': 'mhtcet-class-11-chemistry',
+        'class-12-chemistry': 'mhtcet-class-12-chemistry'
+    }),
+    'jee-course': Object.freeze({
+        'class-11-math': 'jee-class-11-maths',
+        'class-12-math': 'jee-class-12-maths',
+        'class-11-physics': 'jee-class-11-physics',
+        'class-12-physics': 'jee-class-12-physics',
+        'class-11-chemistry': 'jee-class-11-chemistry',
+        'class-12-chemistry': 'jee-class-12-chemistry'
+    })
+});
+
 const MEGA_COURSE_CATALOG = [
     {
         id: 'mht-cet-course',
@@ -5777,7 +5865,10 @@ function getChapterDisplayName(chapterName) {
 function getCourseForMegaCourse(course, megaCourseId = selectedMegaCourseId) {
     if (!course) return null;
     const overrides = megaCourseId === 'jee-course' ? JEE_COURSE_OVERRIDES[course.id] : null;
-    return overrides ? { ...course, ...overrides } : { ...course };
+    const paymentCourseId = PAYMENT_COURSE_IDS[megaCourseId]?.[course.id] || '';
+    return overrides
+        ? { ...course, ...overrides, paymentCourseId }
+        : { ...course, paymentCourseId };
 }
 
 function getCourseById(courseId, megaCourseId = selectedMegaCourseId) {
@@ -5785,6 +5876,68 @@ function getCourseById(courseId, megaCourseId = selectedMegaCourseId) {
         COURSE_CATALOG.find((course) => course.id === courseId) || null,
         megaCourseId
     );
+}
+
+function getPaymentCourseRoute(paymentCourseId) {
+    const targetCourseId = String(paymentCourseId || '').trim();
+    for (const [megaCourseId, courseMap] of Object.entries(PAYMENT_COURSE_IDS)) {
+        const courseEntry = Object.entries(courseMap).find(([, mappedCourseId]) => mappedCourseId === targetCourseId);
+        if (courseEntry) {
+            return {
+                megaCourseId,
+                courseId: courseEntry[0],
+                paymentCourseId: targetCourseId
+            };
+        }
+    }
+    return null;
+}
+
+function getSelectedPaymentCourseId() {
+    return getCourseById(selectedCourseId, selectedMegaCourseId)?.paymentCourseId || '';
+}
+
+function getSelectedCourseChapterIndex(chapterName) {
+    const selectedCourse = getCourseById(selectedCourseId, selectedMegaCourseId);
+    const chapterNames = Array.isArray(selectedCourse?.chapterNames) ? selectedCourse.chapterNames : [];
+    return chapterNames
+        .map(getChapterEntryRecord)
+        .filter(Boolean)
+        .findIndex((entry) => entry.name === chapterName);
+}
+
+function selectRequestedPaymentCourse() {
+    let requestedCourseId = '';
+    try {
+        requestedCourseId = new URLSearchParams(window.location.search).get('courseId') || '';
+    } catch (error) {
+        requestedCourseId = '';
+    }
+
+    const route = getPaymentCourseRoute(requestedCourseId);
+    if (!route) return '';
+
+    selectedMegaCourseId = route.megaCourseId;
+    selectedCourseId = route.courseId;
+    return route.paymentCourseId;
+}
+
+function refreshCoursePurchaseUI() {
+    document.querySelectorAll('[data-course-purchase-id]').forEach((card) => {
+        const courseId = card.dataset.coursePurchaseId || '';
+        const purchased = isCoursePurchased(courseId);
+        const buyButton = card.querySelector('[data-buy-course]');
+        const statusBadge = card.querySelector('[data-purchase-status]');
+
+        card.classList.toggle('purchased-course', purchased);
+        if (buyButton) buyButton.hidden = purchased;
+        if (statusBadge) {
+            statusBadge.className = purchased ? 'purchased-badge' : 'demo-available-badge';
+            statusBadge.innerHTML = purchased
+                ? '<i class="fas fa-circle-check"></i> Purchased'
+                : '<i class="fas fa-gift"></i> Demo Available';
+        }
+    });
 }
 
 function setChapterSectionTitle(title, icon = 'fa-layer-group') {
@@ -5839,6 +5992,24 @@ function getCoursePriceHtml(megaCourse) {
         </div>`;
 }
 
+function getCoursePurchaseActionsHtml(course) {
+    const paymentCourseId = course?.paymentCourseId || '';
+    const purchased = isCoursePurchased(paymentCourseId);
+    return `
+        <div class="course-card-actions">
+            <button class="course-card-status open-chapters-btn" type="button" onclick="event.stopPropagation(); selectCourse('${course.id}')">
+                <i class="fas fa-folder-open"></i> Open Chapters
+            </button>
+            <button class="buy-now-btn" type="button" data-buy-course onclick="event.stopPropagation(); buyCourse('${paymentCourseId}')" ${purchased ? 'hidden' : ''}>
+                <i class="fas fa-bag-shopping"></i> Buy Now
+            </button>
+            <span data-purchase-status class="${purchased ? 'purchased-badge' : 'demo-available-badge'}">
+                <i class="fas ${purchased ? 'fa-circle-check' : 'fa-gift'}"></i>
+                ${purchased ? 'Purchased' : 'Demo Available'}
+            </span>
+        </div>`;
+}
+
 function renderMegaCourseCards() {
     setChapterSectionTitle('Choose Your Course');
     chapterList.innerHTML = MEGA_COURSE_CATALOG.map((course, index) => `
@@ -5865,13 +6036,14 @@ function renderCourseCards() {
         .filter(Boolean);
     setChapterSectionTitle(selectedMegaCourse.title, selectedMegaCourse.icon);
     chapterList.innerHTML = getMegaCourseToolbarHtml(selectedMegaCourse) + courses.map((course, index) => `
-        <button class="card course-card ${course.isEmpty ? 'course-card-empty' : ''}" type="button" onclick="selectCourse('${course.id}')">
+        <article class="card course-card ${course.isEmpty ? 'course-card-empty' : ''}" data-course-purchase-id="${course.paymentCourseId}" onclick="selectCourse('${course.id}')">
             <div class="course-card-icon"><i class="fas ${course.icon}"></i></div>
             <div class="chapter-number">${index + 1}</div>
             <h3>${escapeHtml(course.title)}</h3>
             ${getCoursePriceHtml(selectedMegaCourse)}
-            ${course.status ? `<span class="course-card-status">${escapeHtml(course.status)}</span>` : '<span class="course-card-status empty-status">&nbsp;</span>'}
-        </button>`).join('');
+            ${getCoursePurchaseActionsHtml(course)}
+        </article>`).join('');
+    refreshCoursePurchaseUI();
 }
 
 function selectMegaCourse(megaCourseId) {
@@ -5948,7 +6120,7 @@ function generateChapterList() {
     }
 
     chapterList.innerHTML = toolbarHtml;
-    chapterRecords.forEach((chapterRecord) => {
+    chapterRecords.forEach((chapterRecord, chapterIndex) => {
         const ch           = chapterRecord.name;
         const chapterTitle = chapterRecord.title || getChapterDisplayName(ch);
         const history      = chapterHistory[ch] || [];
@@ -5970,7 +6142,7 @@ function generateChapterList() {
         const isPaused     = pausedTestState && pausedTestState.chapter === ch;
 
         chapterList.innerHTML += `
-            <div class="card" onclick='openChapterParts(${escapeHtml(JSON.stringify(ch))})'>
+            <div class="card" onclick='openChapterParts(${escapeHtml(JSON.stringify(ch))}, ${chapterIndex})'>
                 <div class="chapter-number">${num++}</div>
                 <h3 style="padding-top:0.5rem;">${escapeHtml(chapterTitle)}</h3>
                 <div class="chapter-info">
@@ -6204,6 +6376,11 @@ function updateHistory() {
 async function startTest(ch, partNumber = 1) {
     clearStalePausedTestState();
     const partInfo = getChapterPartInfo(ch, partNumber);
+    const accessContext = getQuizAccessContext(ch, partInfo.partNumber || partNumber);
+    if (!canAccessQuiz(accessContext.courseId, accessContext.chapterIndex, accessContext.quizIndex)) {
+        showLockedQuizModal(accessContext.courseId);
+        return;
+    }
     if (partInfo.questionCount === 0) {
         alert('No questions are available for this part yet.');
         return;
@@ -7382,4 +7559,10 @@ function id(s) { return document.getElementById(s); }
 // ============================================================
 // ===== INIT =====
 // ============================================================
+document.addEventListener('DOMContentLoaded', refreshCoursePurchaseUI);
+window.addEventListener('storage', (event) => {
+    if (event.key === LEARNLOOT_PURCHASED_COURSES_KEY) {
+        refreshCoursePurchaseUI();
+    }
+});
 window.onload = initApp;

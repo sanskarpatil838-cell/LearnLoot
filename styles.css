@@ -463,6 +463,49 @@ body {
   background: rgba(34,197,94,0.85);
 }
 
+.locked-quiz {
+  opacity: 0.55;
+  filter: grayscale(0.25);
+  cursor: not-allowed;
+  position: relative;
+}
+
+.locked-quiz:hover {
+  transform: none !important;
+  border-color: rgba(255,255,255,0.16);
+  background: rgba(255,255,255,0.08);
+}
+
+.lock-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  width: fit-content;
+  margin-top: 10px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 800;
+  color: #ffffff;
+  background: rgba(255,255,255,0.12);
+  border: 1px solid rgba(255,255,255,0.16);
+}
+
+.demo-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  width: fit-content;
+  margin-top: 10px;
+  padding: 7px 13px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 800;
+  color: #facc15;
+  background: rgba(250,204,21,0.14);
+  border: 1px solid rgba(250,204,21,0.25);
+}
+
 .part-number {
   font-weight: 800;
   font-size: 1rem;
@@ -1449,6 +1492,72 @@ body.dark .referral-success-note {
   font-weight: 800;
 }
 
+.course-card-actions {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+}
+
+.open-chapters-btn {
+  border: 0;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.buy-now-btn {
+  border: none;
+  border-radius: 999px;
+  padding: 11px 20px;
+  font-size: 15px;
+  font-weight: 800;
+  cursor: pointer;
+  color: #ffffff;
+  background: linear-gradient(135deg, #4f7cff, #8b5cf6);
+  box-shadow: 0 12px 30px rgba(79,124,255,0.35);
+  transition: 0.25s ease;
+}
+
+.buy-now-btn:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 16px 40px rgba(79,124,255,0.5);
+}
+
+.buy-now-btn:active {
+  transform: scale(0.98);
+}
+
+.purchased-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 13px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 800;
+  color: #22c55e;
+  background: rgba(34,197,94,0.14);
+  border: 1px solid rgba(34,197,94,0.25);
+}
+
+.demo-available-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 13px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 800;
+  color: #facc15;
+  background: rgba(250,204,21,0.14);
+  border: 1px solid rgba(250,204,21,0.25);
+}
+
+.course-card.purchased-course {
+  border-color: rgba(34,197,94,0.32);
+}
+
 .course-card-status {
   display: inline-flex;
   align-items: center;
@@ -1472,6 +1581,74 @@ body.dark .referral-success-note {
 .course-card-empty .course-card-icon {
   background: linear-gradient(135deg, #64748b, #94a3b8);
   box-shadow: none;
+}
+
+.learnloot-modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: rgba(0,0,0,0.72);
+  backdrop-filter: blur(10px);
+}
+
+.learnloot-modal-overlay.active {
+  display: flex;
+}
+
+.learnloot-modal {
+  width: min(420px, 100%);
+  border-radius: 24px;
+  padding: 26px;
+  color: #ffffff;
+  background: linear-gradient(145deg, #111827, #1e293b);
+  border: 1px solid rgba(255,255,255,0.14);
+  box-shadow: 0 30px 90px rgba(0,0,0,0.5);
+  animation: bounceIn 0.3s ease;
+}
+
+.locked-modal-icon {
+  width: 58px;
+  height: 58px;
+  display: grid;
+  place-items: center;
+  margin-bottom: 16px;
+  border-radius: 18px;
+  color: #ffffff;
+  font-size: 1.4rem;
+  background: linear-gradient(135deg, #4f7cff, #8b5cf6);
+  box-shadow: 0 14px 34px rgba(79,124,255,0.3);
+}
+
+.learnloot-modal h2 {
+  margin: 0 0 10px;
+  font-size: 25px;
+  font-weight: 900;
+}
+
+.learnloot-modal p {
+  margin: 0 0 22px;
+  color: #cbd5e1;
+  line-height: 1.6;
+}
+
+.learnloot-modal-actions {
+  display: flex;
+  gap: 12px;
+  justify-content: flex-end;
+}
+
+.modal-cancel-btn {
+  border: none;
+  border-radius: 999px;
+  padding: 11px 18px;
+  font-weight: 800;
+  cursor: pointer;
+  color: #ffffff;
+  background: rgba(255,255,255,0.12);
 }
 
 .course-toolbar {
@@ -2733,6 +2910,19 @@ body.dark .solution { background: rgba(15,23,42,0.8); }
 
   .login-card {
     padding: 1.5rem 1rem;
+  }
+
+  .course-card-actions,
+  .learnloot-modal-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .course-card-actions > *,
+  .learnloot-modal-actions > * {
+    width: 100%;
+    justify-content: center;
+    text-align: center;
   }
 
   .login-logo .login-icon {

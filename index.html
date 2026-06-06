@@ -25,7 +25,7 @@
   };
 </script>
 <script defer src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js"></script>
-<link rel="stylesheet" href="styles.css?v=20260606-auth-pricing-v1"/>
+<link rel="stylesheet" href="styles.css?v=20260606-payment-links-v1"/>
 </head>
 <body class="dark">
 
@@ -494,6 +494,22 @@
   </div>
 </div>
 
+<div class="learnloot-modal-overlay" id="locked-quiz-modal" role="dialog" aria-modal="true" aria-labelledby="locked-quiz-title" onclick="if(event.target===this) closeLockedQuizModal()">
+  <div class="learnloot-modal">
+    <div class="locked-modal-icon" aria-hidden="true">
+      <i class="fas fa-lock"></i>
+    </div>
+    <h2 id="locked-quiz-title">Quiz Locked</h2>
+    <p>This quiz is locked. Buy this course to unlock all chapters and quizzes.</p>
+    <div class="learnloot-modal-actions">
+      <button class="modal-cancel-btn" type="button" onclick="closeLockedQuizModal()">Cancel</button>
+      <button class="buy-now-btn" type="button" onclick="buyLockedQuizCourse()">
+        <i class="fas fa-bag-shopping"></i> Buy Now
+      </button>
+    </div>
+  </div>
+</div>
+
 <!-- ===== RESULT ===== -->
 <div class="container" id="result" style="display:none">
   <div class="result-container">
@@ -531,7 +547,8 @@
 <script defer src="https://www.gstatic.com/firebasejs/12.12.1/firebase-functions-compat.js"></script>
 <script defer src="https://www.gstatic.com/firebasejs/12.12.1/firebase-app-check-compat.js"></script>
 <script defer src="firebase-config.js?v=20260605-local-backend-default-v1"></script>
-<script src="script.js?v=20260606-auth-pricing-v1" defer></script>
+<script src="payment-config.js?v=20260606-payment-links-v1" defer></script>
+<script src="script.js?v=20260606-payment-links-v1" defer></script>
 <script defer>
   (function hardenBackendCalls() {
     function getAppCheckConfig() {

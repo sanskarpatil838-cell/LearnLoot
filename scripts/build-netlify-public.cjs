@@ -8,6 +8,8 @@ const staticFiles = [
   "index.html",
   "styles.css",
   "script.js",
+  "payment-config.js",
+  "payment-success.html",
   "firebase-config.js",
   "firebase.js",
   "manifest.webmanifest"
