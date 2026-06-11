@@ -140,13 +140,15 @@ body {
 }
 
 .login-logo .login-icon {
-  width: 80px; height: 80px;
-  background: linear-gradient(135deg, var(--primary), var(--primary-light));
+  width: 108px;
+  height: 108px;
+  object-fit: cover;
+  object-position: center;
   border-radius: 50%;
-  display: flex; align-items: center; justify-content: center;
-  font-size: 2.5rem; color: white;
+  display: block;
   margin: 0 auto 1rem;
-  box-shadow: 0 8px 25px rgba(67,97,238,0.5);
+  border: 2px solid rgba(103,232,249,0.62);
+  box-shadow: 0 8px 25px rgba(14,165,233,0.38);
 }
 
 .login-logo h1 {
@@ -562,6 +564,18 @@ body {
   font-size: 1.4rem; font-weight: 700;
   color: white;
   text-shadow: 0 2px 4px rgba(0,0,0,0.3);
+}
+
+.site-logo-image {
+  width: 44px;
+  height: 44px;
+  flex: 0 0 44px;
+  display: block;
+  object-fit: cover;
+  object-position: center;
+  border-radius: 50%;
+  border: 1px solid rgba(103,232,249,0.58);
+  box-shadow: 0 4px 14px rgba(14,165,233,0.32);
 }
 
 .header-right {
@@ -2982,9 +2996,8 @@ body.dark .solution { background: rgba(15,23,42,0.8); }
   }
 
   .login-logo .login-icon {
-    width: 68px;
-    height: 68px;
-    font-size: 2rem;
+    width: 88px;
+    height: 88px;
   }
 
   .login-logo h1 {

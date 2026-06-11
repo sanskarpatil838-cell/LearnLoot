@@ -7,6 +7,7 @@ const publicDir = path.join(root, "netlify-public");
 const staticFiles = [
   "index.html",
   "styles.css",
+  "learnloot-logo.jpeg",
   "script.js",
   "payment-config.js",
   "payment-success.html",
