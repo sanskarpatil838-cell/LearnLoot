@@ -7461,7 +7461,6 @@ async function submitTestWithBackendGrading(options = {}) {
                     <p>Correct answer: <strong style="color:var(--success)">${escapeHtml(item.correctAnswer || '')}</strong></p>
                     <p><strong>Wallet:</strong> <span style="color:${item.pointsColor || 'var(--text-secondary)'};">${escapeHtml(item.pointsLabel || 'No points earned.')}</span></p>
                     <p><strong>Running Wallet:</strong> ${Number(item.runningReviewPoints || 0)}</p>
-                    <div class="solution"><strong>Solution:</strong><br>${escapeHtml(item.solution || '')}</div>
                     ${item.marked ? '<p style="color:var(--warning);margin-top:0.5rem;"><i class="fas fa-bookmark"></i> Marked for review</p>' : ''}
                 </div>`;
         });
@@ -7653,7 +7652,6 @@ async function submitTest(options = {}) {
                 <p>Correct answer: <strong style="color:var(--success)">${escapeHtml(item.correctAnswer || '')}</strong></p>
                 <p><strong>Wallet:</strong> <span style="color:${item.pointsColor || 'var(--text-secondary)'};">${escapeHtml(item.pointsLabel || 'No points earned.')}</span></p>
                 <p><strong>Running Wallet:</strong> ${Number(item.runningReviewPoints || 0)}</p>
-                <div class="solution"><strong>Solution:</strong><br>${escapeHtml(item.solution || '')}</div>
                 ${item.marked ? '<p style="color:var(--warning);margin-top:0.5rem;"><i class="fas fa-bookmark"></i> Marked for review</p>' : ''}
             </div>`;
     });
